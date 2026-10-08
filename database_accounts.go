@@ -7,11 +7,11 @@ import (
 	"time"
 )
 
-// ---- 账号 CRUD ----
+// ---- CRUD des comptes ----
 
-// UpsertAccount 按 user_id 自然键插入或更新账号。
-// device_mid / creds_raw 采用 COALESCE(NULLIF(excluded.x,''), accounts.x)：
-// 新值为空时保留旧值，避免重导入抹掉设备指纹与本地凭证快照。
+// UpsertAccount insère ou met à jour un compte selon la clé naturelle user_id.
+// device_mid / creds_raw utilisent COALESCE(NULLIF(excluded.x,''), accounts.x) :
+// conserve l'ancienne valeur si la nouvelle est vide pour préserver l'empreinte et le snapshot.
 func (db *DB) UpsertAccount(a *Account) (int64, error) {
 	res, err := db.conn.Exec(`
 		INSERT INTO accounts (
@@ -42,7 +42,7 @@ func (db *DB) UpsertAccount(a *Account) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	// 取回真实 ID（插入取 LastInsertId，冲突更新按 user_id 查）
+	// Récupérer l'ID réel (LastInsertId à l'insertion, ou requête par user_id en cas de conflit)
 	id, err := res.LastInsertId()
 	if err != nil || id == 0 {
 		row := db.conn.QueryRow(`SELECT id FROM accounts WHERE user_id = ?`, a.UserID)
@@ -84,17 +84,17 @@ func scanAccount(row interface{ Scan(...interface{}) error }) (*Account, error) 
 	return &a, nil
 }
 
-// GetAccount 按 ID 查询
+// GetAccount recherche par ID
 func (db *DB) GetAccount(id int64) (*Account, error) {
 	row := db.conn.QueryRow(`SELECT `+accountCols+` FROM accounts WHERE id = ?`, id)
 	a, err := scanAccount(row)
 	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("账号不存在: %d", id)
+		return nil, fmt.Errorf("Compte introuvable : %d", id)
 	}
 	return a, err
 }
 
-// GetAccountByUserID 按自然键查询
+// GetAccountByUserID recherche par clé naturelle
 func (db *DB) GetAccountByUserID(userID string) (*Account, error) {
 	row := db.conn.QueryRow(`SELECT `+accountCols+` FROM accounts WHERE user_id = ?`, userID)
 	a, err := scanAccount(row)
@@ -104,7 +104,7 @@ func (db *DB) GetAccountByUserID(userID string) (*Account, error) {
 	return a, err
 }
 
-// ListAccounts 列出账号；group 非空时按组过滤
+// ListAccounts liste les comptes ; filtre par groupe si non vide
 func (db *DB) ListAccounts(group string) ([]*Account, error) {
 	query := `SELECT ` + accountCols + ` FROM accounts`
 	var args []interface{}
@@ -129,13 +129,13 @@ func (db *DB) ListAccounts(group string) ([]*Account, error) {
 	return out, rows.Err()
 }
 
-// DeleteAccount 删除账号
+// DeleteAccount supprime un compte
 func (db *DB) DeleteAccount(id int64) error {
 	_, err := db.conn.Exec(`DELETE FROM accounts WHERE id = ?`, id)
 	return err
 }
 
-// UpdateAccountFields 更新账号可变字段（UI 编辑：备注/分组/启用）
+// UpdateAccountFields met à jour les champs modifiables (groupe, note, activation)
 func (db *DB) UpdateAccountFields(id int64, group, remark string, enabled bool) error {
 	_, err := db.conn.Exec(`
 		UPDATE accounts SET account_group = ?, remark = ?, enabled = ?,
@@ -147,7 +147,7 @@ func (db *DB) UpdateAccountFields(id int64, group, remark string, enabled bool) 
 	return err
 }
 
-// UpdateAccountTokens 更新凭证字段（OAuth 刷新 / 手动编辑）
+// UpdateAccountTokens met à jour les identifiants
 func (db *DB) UpdateAccountTokens(id int64, accessToken, refreshToken, zcodeJWT, apiKey, userInfo string) error {
 	_, err := db.conn.Exec(`
 		UPDATE accounts SET
@@ -161,7 +161,7 @@ func (db *DB) UpdateAccountTokens(id int64, accessToken, refreshToken, zcodeJWT,
 	return err
 }
 
-// SetAccountStatus 设置账号状态（含冷却时间）
+// SetAccountStatus définit le statut du compte et le refroidissement
 func (db *DB) SetAccountStatus(id int64, status, lastError string, coolingUntil int64) error {
 	_, err := db.conn.Exec(`
 		UPDATE accounts SET status = ?, last_error = ?, cooling_until = ?,
@@ -170,7 +170,7 @@ func (db *DB) SetAccountStatus(id int64, status, lastError string, coolingUntil 
 	return err
 }
 
-// SetAccountQuota 写入额度快照
+// SetAccountQuota enregistre l'instantané de quota
 func (db *DB) SetAccountQuota(id int64, quotaJSON, planTier, planExpire string, total, used, remaining float64) error {
 	_, err := db.conn.Exec(`
 		UPDATE accounts SET quota_json = ?, plan_tier = ?, plan_expire = ?,
@@ -180,7 +180,7 @@ func (db *DB) SetAccountQuota(id int64, quotaJSON, planTier, planExpire string, 
 	return err
 }
 
-// TouchAccountUse 记录一次成功使用
+// TouchAccountUse enregistre une utilisation avec succès
 func (db *DB) TouchAccountUse(id int64) error {
 	_, err := db.conn.Exec(`
 		UPDATE accounts SET use_count = use_count + 1, last_used_at = ?,
@@ -190,7 +190,7 @@ func (db *DB) TouchAccountUse(id int64) error {
 	return err
 }
 
-// BumpAccountFail 记录一次失败
+// BumpAccountFail enregistre un échec
 func (db *DB) BumpAccountFail(id int64, lastError string) error {
 	_, err := db.conn.Exec(`
 		UPDATE accounts SET fail_count = fail_count + 1, last_error = ?,
@@ -198,7 +198,7 @@ func (db *DB) BumpAccountFail(id int64, lastError string) error {
 	return err
 }
 
-// SetAccountClaimResult 记录活动领取结果
+// SetAccountClaimResult enregistre le résultat d'une récupération
 func (db *DB) SetAccountClaimResult(id int64, planName, msg string) error {
 	_, err := db.conn.Exec(`
 		UPDATE accounts SET last_claim_at = datetime('now','localtime'),
@@ -207,7 +207,7 @@ func (db *DB) SetAccountClaimResult(id int64, planName, msg string) error {
 	return err
 }
 
-// ListGroups 返回所有已用分组名（账号 + 代理节点合并去重）
+// ListGroups renvoie la liste de tous les groupes utilisés
 func (db *DB) ListGroups() ([]string, error) {
 	rows, err := db.conn.Query(`
 		SELECT account_group FROM accounts WHERE account_group != ''
@@ -224,7 +224,7 @@ func (db *DB) ListGroups() ([]string, error) {
 		if err := rows.Scan(&g); err != nil {
 			continue
 		}
-		// group_name 可能是逗号分隔多组
+		// group_name peut être une liste séparée par des virgules
 		for _, part := range strings.Split(g, ",") {
 			part = strings.TrimSpace(part)
 			if part != "" && !seen[part] {
@@ -236,7 +236,7 @@ func (db *DB) ListGroups() ([]string, error) {
 	return out, rows.Err()
 }
 
-// CountAccountsByStatus 状态统计（仪表盘）
+// CountAccountsByStatus statistiques de statuts pour le tableau de bord
 func (db *DB) CountAccountsByStatus() (map[string]int, error) {
 	rows, err := db.conn.Query(`SELECT status, COUNT(*) FROM accounts GROUP BY status`)
 	if err != nil {

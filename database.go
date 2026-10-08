@@ -8,66 +8,66 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// ---- SQLite 数据库层 ----
-// 使用 modernc.org/sqlite 纯 Go 驱动，无需 CGO（驱动注册名 "sqlite"）
+// ---- Couche base de données SQLite ----
+// Utilise le pilote 100 % Go modernc.org/sqlite, sans CGO (nom d'enregistrement du pilote : "sqlite")
 
-// Account 数据库中的 ZCode 账号记录。
-// user_id 为自然键：重复导入同一账号时按 user_id upsert，
-// device_mid / credentials_raw 一旦写入不会被后续导入清空（COALESCE 保留）。
+// Account : enregistrement de compte ZCode en base.
+// user_id est la clé naturelle : un réimport du même compte fait un upsert sur user_id,
+// device_mid / credentials_raw : une fois écrites, ces valeurs ne sont pas effacées par les imports suivants (conservées via COALESCE).
 type Account struct {
 	ID          int64  `json:"id"`
-	UserID      string `json:"user_id"`      // 自然键（JWT user_id / user_info.id）
-	Email       string `json:"email"`        // 登录邮箱
-	DisplayName string `json:"display_name"` // 昵称
+	UserID      string `json:"user_id"`      // clé naturelle (JWT user_id / user_info.id)
+	Email       string `json:"email"`        // e-mail de connexion
+	DisplayName string `json:"display_name"` // pseudo
 	Provider    string `json:"provider"`     // zai | bigmodel
 	AuthType    string `json:"auth_type"`    // jwt | apikey
 
-	AccessToken  string `json:"-"` // OAuth access_token（JWT，内含 api_key claim）
+	AccessToken  string `json:"-"` // OAuth access_token (JWT, contient le claim api_key)
 	RefreshToken string `json:"-"` // OAuth refresh_token
-	ZCodeJWT     string `json:"-"` // Coding Plan JWT（zcode.z.ai 免费通道凭证）
-	APIKey       string `json:"-"` // api.z.ai 通道密钥（{api_key}.{secret_key}）
-	UserInfo     string `json:"-"` // 原始 user_info JSON
-	DeviceMid    string `json:"device_mid"`     // X-Device-Mid（设备指纹，永不被重导入覆盖）
-	CredsRaw     string `json:"-"`              // 本地客户端 credentials.json 原始内容（供一键切回）
+	ZCodeJWT     string `json:"-"` // Coding Plan JWT (identifiant du canal gratuit zcode.z.ai)
+	APIKey       string `json:"-"` // clé du canal api.z.ai ({api_key}.{secret_key})
+	UserInfo     string `json:"-"` // JSON user_info brut
+	DeviceMid    string `json:"device_mid"`     // X-Device-Mid (empreinte d'appareil, jamais écrasée par un réimport)
+	CredsRaw     string `json:"-"`              // contenu brut du credentials.json du client local (pour la bascule en un clic)
 
 	Status       string `json:"status"`        // active|exhausted|cooling|invalid|disabled|inactive
-	Enabled      bool   `json:"enabled"`       // 是否参与轮询
-	AccountGroup string `json:"group"`         // 分组（空=未分组）
-	QuotaJSON    string `json:"-"`             // 最近一次额度快照（规范化 JSON）
-	PlanTier     string `json:"plan_tier"`     // Start Plan / Lite / Pro / Max / 体验
-	PlanExpire   string `json:"plan_expire"`   // 套餐到期时间（展示用字符串）
+	Enabled      bool   `json:"enabled"`       // participe ou non à la rotation
+	AccountGroup string `json:"group"`         // groupe (vide = non groupé)
+	QuotaJSON    string `json:"-"`             // dernier instantané de quota (JSON normalisé)
+	PlanTier     string `json:"plan_tier"`     // Start Plan / Lite / Pro / Max / essai
+	PlanExpire   string `json:"plan_expire"`   // date d'expiration du forfait (chaîne d'affichage)
 	TotalUnits   float64 `json:"total_units"`
 	UsedUnits    float64 `json:"used_units"`
 	Remaining    float64 `json:"remaining"`
 
 	UseCount      int    `json:"use_count"`
 	FailCount     int    `json:"fail_count"`
-	LastUsedAt    int64  `json:"last_used_at"`    // epoch 秒
-	LastCheckedAt int64  `json:"last_checked_at"` // 额度刷新时间 epoch 秒
-	CoolingUntil  int64  `json:"cooling_until"`   // 冷却截止 epoch 秒
+	LastUsedAt    int64  `json:"last_used_at"`    // secondes epoch
+	LastCheckedAt int64  `json:"last_checked_at"` // heure de rafraîchissement du quota, en secondes epoch
+	CoolingUntil  int64  `json:"cooling_until"`   // fin du refroidissement, en secondes epoch
 	LastError     string `json:"last_error"`
 
-	LastClaimAt   string `json:"last_claim_at"`   // 最近活动领取时间
-	LastClaimPlan string `json:"last_claim_plan"` // 最近领取的活动名
-	LastClaimMsg  string `json:"last_claim_msg"`  // 最近领取结果
+	LastClaimAt   string `json:"last_claim_at"`   // heure du dernier retrait d'activité
+	LastClaimPlan string `json:"last_claim_plan"` // nom de la dernière activité retirée
+	LastClaimMsg  string `json:"last_claim_msg"`  // résultat du dernier retrait
 
 	Remark    string `json:"remark"`
 	CreatedAt string `json:"created_at"`
 	UpdatedAt string `json:"updated_at"`
 }
 
-// ClaimPlan 活动计划（cron 调度）：检测活动 / 一键领取 / 激活套餐
+// ClaimPlan plan d'activité (ordonnancement cron) : détection / récupération / activation
 type ClaimPlan struct {
 	ID            int64  `json:"id"`
 	PlanName      string `json:"plan_name"`
-	CronExpr      string `json:"cron_expr"`      // 5 段: 分 时 日 月 周
+	CronExpr      string `json:"cron_expr"`      // 5 segments : min heure jour mois semaine
 	IsActive      bool   `json:"is_active"`
 	TargetType    string `json:"target_type"`    // all_accounts | single_account | group
-	AccountID     int64  `json:"account_id"`     // single_account 时有效
-	AccountGroup  string `json:"account_group"`  // group 时有效
+	AccountID     int64  `json:"account_id"`     // Valide si single_account
+	AccountGroup  string `json:"account_group"`  // Valide si group
 	TaskType      string `json:"task_type"`      // detect | claim | activate
-	AutoPick      bool   `json:"auto_pick"`      // claim 时自动选优先级最高的活动
-	DelaySeconds  int    `json:"delay_seconds"`  // 多账号间隔秒数（防风控）
+	AutoPick      bool   `json:"auto_pick"`      // Sélection automatique de la priorité la plus haute lors de claim
+	DelaySeconds  int    `json:"delay_seconds"`  // Délai en secondes entre comptes (anti-contrôle)
 	LastRunAt     string `json:"last_run_at"`
 	LastRunStatus string `json:"last_run_status"`
 	LastRunMsg    string `json:"last_run_msg"`
@@ -75,7 +75,7 @@ type ClaimPlan struct {
 	UpdatedAt     string `json:"updated_at"`
 }
 
-// ClaimRecord 活动领取记录
+// ClaimRecord historique de récupération d'activité
 type ClaimRecord struct {
 	ID         int64  `json:"id"`
 	CreatedAt  string `json:"created_at"`
@@ -87,10 +87,10 @@ type ClaimRecord struct {
 	Success    bool   `json:"success"`
 	Code       int    `json:"code"`
 	Message    string `json:"message"`
-	NextAt     int64  `json:"next_at"` // 1005 名额用完时的下次可领时间 epoch 毫秒
+	NextAt     int64  `json:"next_at"` // Prochaine disponibilité epoch ms lorsque le quota 1005 est épuisé
 }
 
-// UsageRecord API 使用记录
+// UsageRecord enregistrement d'utilisation de l'API
 type UsageRecord struct {
 	ID               int64  `json:"id"`
 	CreatedAt        string `json:"created_at"`
@@ -106,7 +106,7 @@ type UsageRecord struct {
 	TtftMs           int    `json:"ttft_ms"`
 }
 
-// ProxyNode 出口代理节点（组绑定）
+// ProxyNode nœud proxy de sortie (lié à un groupe)
 type ProxyNode struct {
 	ID           int64  `json:"id"`
 	Name         string `json:"name"`
@@ -116,7 +116,7 @@ type ProxyNode struct {
 	Username     string `json:"username"`
 	Password     string `json:"password"`
 	IsDefault    bool   `json:"is_default"`
-	GroupName    string `json:"group_name"` // 绑定的账号组（多组用逗号分隔）
+	GroupName    string `json:"group_name"` // Groupes de comptes liés (séparés par virgules)
 	Enabled      bool   `json:"enabled"`
 	CheckStatus  string `json:"check_status"`
 	CheckLatency int    `json:"check_latency"`
@@ -127,7 +127,7 @@ type ProxyNode struct {
 	UpdatedAt    string `json:"updated_at"`
 }
 
-// PlanRunRecord 计划运行记录
+// PlanRunRecord historique d'exécution de plan
 type PlanRunRecord struct {
 	ID           int64  `json:"id"`
 	PlanID       int64  `json:"plan_id"`
@@ -144,18 +144,18 @@ type PlanRunRecord struct {
 	DurationMs   int    `json:"duration_ms"`
 }
 
-// DB 持有数据库连接
+// DB gère la connexion à la base de données
 type DB struct {
 	conn *sql.DB
 }
 
-// NewDB 打开/创建 SQLite 数据库并初始化 schema
+// NewDB ouvre/crée la base SQLite et initialise le schéma
 func NewDB(dbPath string) (*DB, error) {
 	conn, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	conn.SetMaxOpenConns(1) // SQLite 单写
+	conn.SetMaxOpenConns(1) // Écriture unique SQLite
 	pragmas := []string{
 		"PRAGMA journal_mode=WAL",
 		"PRAGMA synchronous=NORMAL",
@@ -176,7 +176,7 @@ func NewDB(dbPath string) (*DB, error) {
 	return db, nil
 }
 
-// Close 关闭数据库连接
+// Close ferme la connexion à la base
 func (db *DB) Close() error {
 	return db.conn.Close()
 }
@@ -324,7 +324,7 @@ func (db *DB) initSchema() error {
 	if _, err := db.conn.Exec(schema); err != nil {
 		return fmt.Errorf("init schema: %w", err)
 	}
-	// 默认设置项
+	// Paramètres par défaut
 	defaults := map[string]string{
 		"admin_user":             "admin",
 		"is_default_password":    "1",

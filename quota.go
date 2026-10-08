@@ -12,11 +12,11 @@ import (
 	"time"
 )
 
-// ---- 额度查询与归一化 ----
-// 两个通道：
-//   jwt    → zcode.z.ai /api/v1/zcode-plan/billing/current（失败再试 /billing/balance）
+// ---- Requête et normalisation de quota ----
+// Deux canaux :
+//   jwt    → zcode.z.ai /api/v1/zcode-plan/billing/current (puis /billing/balance en cas d'échec)
 //   apikey → api.z.ai /api/monitor/usage/quota/limit + /api/biz/subscription/list
-// 归一化逻辑移植 zcode-switch quota.rs（plans/balances 双结构 + 防御式字段别名）。
+// Normalisation portée depuis zcode-switch quota.rs (structures plans/balances + alias de champs défensifs).
 
 const (
 	BillingBaseURL     = "https://zcode.z.ai/api/v1/zcode-plan"
@@ -28,7 +28,7 @@ const (
 	ClientConfigsURL   = "https://zcode.z.ai/api/v1/client/configs"
 )
 
-// QuotaItem 单条额度切片
+// QuotaItem fragment de quota unitaire
 type QuotaItem struct {
 	Name        string   `json:"name"`
 	Total       *float64 `json:"total"`
@@ -39,8 +39,8 @@ type QuotaItem struct {
 	PeriodEnd   string   `json:"period_end"`
 }
 
-// QuotaOverview 归一化额度总览
-// QuotaPlanSlot 单个套餐槽位（plans[] 与其 balances 明细）
+// QuotaOverview vue d'ensemble normalisée du quota
+// QuotaPlanSlot emplacement de forfait individuel (plans[] et ses balances détaillées)
 type QuotaPlanSlot struct {
 	PlanID      string      `json:"plan_id"`
 	Name        string      `json:"name"`
@@ -65,19 +65,19 @@ type QuotaOverview struct {
 	Plans       []QuotaPlanSlot `json:"plans"`
 	Source      string          `json:"source"`
 	RefreshedAt int64           `json:"refreshed_at"`
-	NotEntitled bool            `json:"not_entitled"` // 无 Coding Plan / 未激活
-	AuthFailed  bool            `json:"auth_failed"`  // 401/403 凭证失效
+	NotEntitled bool            `json:"not_entitled"` // Sans Coding Plan / inactif
+	AuthFailed  bool            `json:"auth_failed"`  // Identifiants 401/403 invalides
 	IsEmpty     bool            `json:"is_empty"`
 }
 
-// quotaResult 内部：HTTP + 业务码 + 原始 JSON
+// apiResponse interne : HTTP + code métier + JSON brut
 type apiResponse struct {
 	StatusCode int
 	Body       map[string]interface{}
 	RawText    string
 }
 
-// doGetJSON 带客户端身份头的 GET 请求
+// doGetJSON requête GET avec en-têtes d'identité client
 func (z *ZCodeAPI) doGetJSON(a *Account, urlStr string, extraHeaders map[string]string) (*apiResponse, error) {
 	client := ClientForURL(z.egress.ProxyURLForAccount(a), urlStr, 25*time.Second)
 	req, err := http.NewRequest("GET", urlStr, nil)
@@ -88,10 +88,10 @@ func (z *ZCodeAPI) doGetJSON(a *Account, urlStr string, extraHeaders map[string]
 	for k, v := range ZaiClientHeaders(id) {
 		req.Header.Set(k, v)
 	}
-	// 认证：JWT 优先，API Key 通道同样以 Bearer 传递（monitor/subscription 端点语义）
+	// Authentification : JWT en priorité, le canal API Key passe aussi par Bearer
 	token := z.billingToken(a)
 	if token == "" {
-		return nil, fmt.Errorf("账号缺少有效凭证")
+		return nil, fmt.Errorf("Compte sans identifiant valide")
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	for k, v := range extraHeaders {
@@ -113,8 +113,8 @@ func (z *ZCodeAPI) doGetJSON(a *Account, urlStr string, extraHeaders map[string]
 	return out, nil
 }
 
-// billingToken 选择计费接口凭证（quota.rs zai_billing_token 简化版）：
-// JWT 账号用 zcode_jwt；API Key 账号用 api_key
+// billingToken sélectionne l'identifiant pour l'interface de facturation :
+// zcode_jwt pour compte JWT ; api_key pour compte API Key
 func (z *ZCodeAPI) billingToken(a *Account) string {
 	if a.ZCodeJWT != "" {
 		return a.ZCodeJWT
@@ -174,7 +174,7 @@ func jsonNum(v map[string]interface{}, keys ...string) *float64 {
 	return nil
 }
 
-// unwrapData 递归解包 data/result 层（最多 4 层）
+// unwrapData dépaquette récursivement les couches data/result (jusqu'à 4 niveaux)
 func unwrapData(v map[string]interface{}) map[string]interface{} {
 	cur := v
 	for i := 0; i < 4; i++ {
@@ -191,16 +191,16 @@ func unwrapData(v map[string]interface{}) map[string]interface{} {
 	return cur
 }
 
-// ---- 主入口 ----
+// ---- Point d'entrée principal ----
 
-// FetchQuotaRaw 拉取并归一化账号额度（不落库、不改状态）
+// FetchQuotaRaw récupère et normalise le quota du compte (sans écriture en base, sans changer le statut)
 func (z *ZCodeAPI) FetchQuotaRaw(a *Account) (*QuotaOverview, error) {
 	if a.ZCodeJWT != "" {
 		ov, err := z.fetchZaiBilling(a)
 		if err == nil {
 			return ov, nil
 		}
-		// JWT 通道鉴权失败且账号带 API Key 时回退 monitor 通道
+		// Si échec d'authentification sur le canal JWT et que le compte a une API Key, repli sur le canal monitor
 		if a.APIKey != "" && (ov == nil || ov.AuthFailed || isAuthErr(err)) {
 			return z.fetchApiZaiMonitor(a)
 		}
@@ -209,14 +209,14 @@ func (z *ZCodeAPI) FetchQuotaRaw(a *Account) (*QuotaOverview, error) {
 	if a.APIKey != "" {
 		return z.fetchApiZaiMonitor(a)
 	}
-	return nil, fmt.Errorf("账号缺少凭证")
+	return nil, fmt.Errorf("Compte sans identifiants")
 }
 
 func isAuthErr(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "401")
 }
 
-// fetchZaiBilling JWT 通道：billing/current → billing/balance
+// fetchZaiBilling canal JWT : billing/current → billing/balance
 func (z *ZCodeAPI) fetchZaiBilling(a *Account) (*QuotaOverview, error) {
 	urlCurrent := fmt.Sprintf("%s/billing/current?app_version=%s", BillingBaseURL, z.appVersion)
 	resp, err := z.doGetJSON(a, urlCurrent, nil)
@@ -224,11 +224,11 @@ func (z *ZCodeAPI) fetchZaiBilling(a *Account) (*QuotaOverview, error) {
 		return nil, err
 	}
 	if resp.StatusCode == 401 || resp.StatusCode == 403 {
-		return &QuotaOverview{AuthFailed: true}, fmt.Errorf("HTTP %d 鉴权失败", resp.StatusCode)
+		return &QuotaOverview{AuthFailed: true}, fmt.Errorf("Échec d'authentification HTTP %d", resp.StatusCode)
 	}
 	if resp.Body != nil {
 		if code := jsonInt(resp.Body, "code"); code == 401 {
-			return &QuotaOverview{AuthFailed: true}, fmt.Errorf("业务码 401 令牌失效")
+			return &QuotaOverview{AuthFailed: true}, fmt.Errorf("Code métier 401 : jeton invalide")
 		}
 	}
 	if resp.StatusCode == 200 && businessOK(resp.Body) {
@@ -236,14 +236,14 @@ func (z *ZCodeAPI) fetchZaiBilling(a *Account) (*QuotaOverview, error) {
 		ov.RefreshedAt = time.Now().Unix()
 		return ov, nil
 	}
-	// current 失败 → balance 兜底
+	// Échec de current -> secours sur balance
 	urlBalance := fmt.Sprintf("%s/billing/balance?app_version=%s", BillingBaseURL, z.appVersion)
 	resp2, err := z.doGetJSON(a, urlBalance, nil)
 	if err != nil {
 		return nil, err
 	}
 	if resp2.StatusCode == 401 || resp2.StatusCode == 403 {
-		return &QuotaOverview{AuthFailed: true}, fmt.Errorf("HTTP %d 鉴权失败", resp2.StatusCode)
+		return &QuotaOverview{AuthFailed: true}, fmt.Errorf("Échec d'authentification HTTP %d", resp2.StatusCode)
 	}
 	if resp2.StatusCode == 200 && businessOK(resp2.Body) {
 		ov := normalizeBalanceResponse(resp2.Body, "zcode.z.ai/billing")
@@ -254,34 +254,34 @@ func (z *ZCodeAPI) fetchZaiBilling(a *Account) (*QuotaOverview, error) {
 	if msg == "" {
 		msg = extractErrMsg(resp.Body)
 	}
-	if strings.Contains(msg, "不存在coding plan") || strings.Contains(msg, "没有资格") {
+	if strings.Contains(msg, "\u4e0d\u5b58\u5728coding plan") || strings.Contains(msg, "\u6ca1\u6709\u8d44\u683c") {
 		return &QuotaOverview{NotEntitled: true, IsEmpty: true}, nil
 	}
 	if msg == "" {
 		msg = fmt.Sprintf("HTTP %d", resp2.StatusCode)
 	}
-	return nil, fmt.Errorf("额度查询失败: %s", msg)
+	return nil, fmt.Errorf("Échec de la requête de quota : %s", msg)
 }
 
-// fetchApiZaiMonitor API Key 通道：quota/limit + subscription/list
+// fetchApiZaiMonitor canal API Key : quota/limit + subscription/list
 func (z *ZCodeAPI) fetchApiZaiMonitor(a *Account) (*QuotaOverview, error) {
 	resp, err := z.doGetJSON(a, QuotaLimitURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode == 401 || resp.StatusCode == 403 {
-		return &QuotaOverview{AuthFailed: true}, fmt.Errorf("HTTP %d 鉴权失败", resp.StatusCode)
+		return &QuotaOverview{AuthFailed: true}, fmt.Errorf("Échec d'authentification HTTP %d", resp.StatusCode)
 	}
 	if !businessOK(resp.Body) {
 		code := jsonInt(resp.Body, "code")
 		if code == 401 {
-			return &QuotaOverview{AuthFailed: true}, fmt.Errorf("业务码 401 令牌失效")
+			return &QuotaOverview{AuthFailed: true}, fmt.Errorf("Code métier 401 : jeton invalide")
 		}
 		msg := extractErrMsg(resp.Body)
-		if strings.Contains(msg, "不存在coding plan") || strings.Contains(msg, "没有资格") {
+		if strings.Contains(msg, "\u4e0d\u5b58\u5728coding plan") || strings.Contains(msg, "\u6ca1\u6709\u8d44\u683c") {
 			return &QuotaOverview{NotEntitled: true, IsEmpty: true}, nil
 		}
-		return nil, fmt.Errorf("额度查询失败: %s", msg)
+		return nil, fmt.Errorf("Échec de la requête de quota : %s", msg)
 	}
 	var sub *map[string]interface{}
 	if subResp, err := z.doGetJSON(a, SubscriptionURL, nil); err == nil && businessOK(subResp.Body) {
@@ -306,13 +306,13 @@ func extractErrMsg(v map[string]interface{}) string {
 	return ""
 }
 
-// ---- 归一化：billing/current & billing/balance（zcode.z.ai）----
+// ---- Normalisation : billing/current & billing/balance (zcode.z.ai) ----
 
 func normalizeBalanceResponse(raw map[string]interface{}, source string) *QuotaOverview {
 	data := unwrapData(raw)
 	ov := &QuotaOverview{Source: source}
 
-	// plans[]：建槽位并取 active 套餐推断 tier / expire
+	// plans[] : création des emplacements et déduction du tier / expire à partir du forfait actif
 	slots := map[string]*QuotaPlanSlot{}
 	var slotOrder []string
 	var activePlan map[string]interface{}
@@ -351,7 +351,7 @@ func normalizeBalanceResponse(raw map[string]interface{}, source string) *QuotaO
 		ov.PlanExpire = ExtractExpire(activePlan)
 	}
 
-	// balances[]：逐模型额度切片
+	// balances[] : fragments de quota par modèle
 	if balances, ok := data["balances"].([]interface{}); ok {
 		var totalSum, usedSum, remSum float64
 		hasTotal, hasUsed, hasRem := false, false, false
@@ -369,9 +369,9 @@ func normalizeBalanceResponse(raw map[string]interface{}, source string) *QuotaO
 				PeriodEnd: ExtractExpire(bm),
 			}
 			if item.Name == "" {
-				item.Name = "额度"
+				item.Name = "Quota"
 			}
-			// 三值互推
+			// Déduction mutuelle des trois valeurs
 			if item.Remaining == nil && item.Total != nil && item.Used != nil {
 				r := math.Max(*item.Total-*item.Used, 0)
 				item.Remaining = &r
@@ -396,7 +396,7 @@ func normalizeBalanceResponse(raw map[string]interface{}, source string) *QuotaO
 				remSum += *item.Remaining
 				hasRem = true
 			}
-			// 归入对应套餐槽位（按 plan_id；无则单槽位或"其他"）
+			// Rangement dans le créneau correspondant
 			bpid := firstNonEmpty(jsonStr(bm, "plan_id"), jsonStr(bm, "planId"))
 			if bpid == "" && len(slotOrder) == 1 {
 				bpid = slotOrder[0]
@@ -406,7 +406,7 @@ func normalizeBalanceResponse(raw map[string]interface{}, source string) *QuotaO
 			}
 			slot, exists := slots[bpid]
 			if !exists {
-				slot = &QuotaPlanSlot{PlanID: bpid, Name: "其他额度", Tier: PlanTierFromID(bpid, "")}
+				slot = &QuotaPlanSlot{PlanID: bpid, Name: "Autre quota", Tier: PlanTierFromID(bpid, "")}
 				slots[bpid] = slot
 				slotOrder = append(slotOrder, bpid)
 			}
@@ -425,7 +425,7 @@ func normalizeBalanceResponse(raw map[string]interface{}, source string) *QuotaO
 		ov.IsEmpty = len(balances) == 0
 	}
 
-	// 顶层直给的 total/used/remaining（部分响应不带 balances）
+	// Valeurs au premier niveau
 	if ov.Total == nil {
 		ov.Total = jsonNum(data, "total_units", "total")
 	}
@@ -440,7 +440,7 @@ func normalizeBalanceResponse(raw map[string]interface{}, source string) *QuotaO
 		ov.PercentUsed = &p
 	}
 
-	// 聚合套餐槽位（每个槽位由其明细求和）
+	// Agrégation des créneaux de forfait
 	for _, pid := range slotOrder {
 		slot := slots[pid]
 		var t, u, r float64
@@ -483,7 +483,7 @@ func normalizeBalanceResponse(raw map[string]interface{}, source string) *QuotaO
 	return ov
 }
 
-// ---- 归一化：quota/limit + subscription/list（api.z.ai）----
+// ---- Normalisation : quota/limit + subscription/list (api.z.ai) ----
 
 func normalizeQuotaLimit(raw map[string]interface{}, sub *map[string]interface{}) *QuotaOverview {
 	data := unwrapData(raw)
@@ -508,9 +508,9 @@ func normalizeQuotaLimit(raw map[string]interface{}, sub *map[string]interface{}
 		name := typ
 		switch typ {
 		case "TOKENS_LIMIT":
-			name = fmt.Sprintf("提示次数（%s）", period)
+			name = fmt.Sprintf("Nombre d'invites (%s)", period)
 		case "TIME_LIMIT":
-			name = fmt.Sprintf("使用时长（%s）", period)
+			name = fmt.Sprintf("Durée d'utilisation (%s)", period)
 		}
 		item := QuotaItem{
 			Name:      name,
@@ -520,7 +520,7 @@ func normalizeQuotaLimit(raw map[string]interface{}, sub *map[string]interface{}
 			Unit:      typ,
 		}
 		if reset := jsonNum(lm, "nextResetTime"); reset != nil && *reset > 0 {
-			item.PeriodEnd = formatEpochMsLocal(*reset) + " 重置"
+			item.PeriodEnd = formatEpochMsLocal(*reset) + " Réinitialisation"
 		}
 		if total != nil && used != nil && *total > 0 {
 			p := math.Min(math.Max(*used / *total * 100, 0), 100)
@@ -529,7 +529,7 @@ func normalizeQuotaLimit(raw map[string]interface{}, sub *map[string]interface{}
 			item.PercentUsed = pct
 		}
 		ov.Items = append(ov.Items, item)
-		// 主切片：TIME_LIMIT 优先（分钟配额）
+		// Fragment principal : TIME_LIMIT en priorité (quota en minutes)
 		if typ == "TIME_LIMIT" && total != nil && ov.Total == nil {
 			ov.Total, ov.Used, ov.Remaining, ov.PercentUsed = total, used, remaining, item.PercentUsed
 		}
@@ -544,7 +544,7 @@ func normalizeQuotaLimit(raw map[string]interface{}, sub *map[string]interface{}
 	}
 	ov.IsEmpty = len(limits) == 0
 
-	// subscription/list 补套餐名与到期（响应形如 {"code":200,"data":[{...}]}）
+	// subscription/list complète le nom du forfait et son expiration
 	if sub != nil {
 		arr, _ := (*sub)["data"].([]interface{})
 		var current map[string]interface{}
@@ -582,15 +582,15 @@ func unitLabel(unit, number int) string {
 		if number <= 0 {
 			number = 5
 		}
-		return fmt.Sprintf("每 %d 小时", number)
+		return fmt.Sprintf("toutes les %d heures", number)
 	case 4:
-		return "每天"
+		return "par jour"
 	case 5:
-		return "每月"
+		return "par mois"
 	case 6:
-		return "每周"
+		return "par semaine"
 	}
-	return "每周期"
+	return "par cycle"
 }
 
 func tierFromLevel(level string) string {
@@ -606,7 +606,7 @@ func tierFromLevel(level string) string {
 	return level
 }
 
-// PlanTierFromID 从 plan_id/name 推断套餐档位（quota.rs plan_tier_from_id 移植）
+// PlanTierFromID déduit le niveau de forfait depuis plan_id/name
 func PlanTierFromID(planID, name string) string {
 	hay := strings.ToLower(planID + " " + name)
 	switch {
@@ -619,9 +619,9 @@ func PlanTierFromID(planID, name string) string {
 	case strings.Contains(hay, "start"):
 		return "Start Plan"
 	}
-	for _, kw := range []string{"trial", "taste", "experience", "gift", "weekend", "promo", "activity", "体验"} {
+	for _, kw := range []string{"trial", "taste", "experience", "gift", "weekend", "promo", "activity", "essai"} {
 		if strings.Contains(hay, kw) {
-			return "体验"
+			return "Essai"
 		}
 	}
 	if planID != "" {
@@ -630,7 +630,7 @@ func PlanTierFromID(planID, name string) string {
 	return name
 }
 
-// tierRank 档位排序（merge 时选主切片）
+// tierRank ordre des niveaux (sélection du fragment principal lors du merge)
 func tierRank(tier string) int {
 	switch strings.ToLower(tier) {
 	case "max":
@@ -641,13 +641,13 @@ func tierRank(tier string) int {
 		return 3
 	case "start plan":
 		return 2
-	case "体验":
+	case "essai":
 		return 1
 	}
 	return 0
 }
 
-// ExtractExpire 从对象中提取到期时间（quota.rs extract_expire 移植，支持 epoch 秒/毫秒与常见字符串）
+// ExtractExpire extrait la date d'expiration d'un objet
 func ExtractExpire(obj map[string]interface{}) string {
 	keys := []string{"nextRenewTime", "expireTime", "expire_time", "endTime", "end_time",
 		"expireAt", "expiredTime", "validEndTime", "expires_at", "expiresAt", "expired_at",
@@ -707,9 +707,9 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
-// ---- 状态判定（quota.py 状态迁移移植）----
+// ---- Détermination du statut ----
 
-// AllExhausted 所有切片剩余额度均 <= 0
+// AllExhausted tous les fragments ont un quota restant <= 0
 func (ov *QuotaOverview) AllExhausted() bool {
 	if len(ov.Items) == 0 {
 		return ov.Remaining != nil && *ov.Remaining <= 0
@@ -722,7 +722,7 @@ func (ov *QuotaOverview) AllExhausted() bool {
 	return true
 }
 
-// SortItemsByRemaining 剩余多的在前（best_quota 展示）
+// SortItemsByRemaining trie avec les plus grands quotas restants en premier (affichage best_quota)
 func SortItemsByRemaining(items []QuotaItem) {
 	sort.SliceStable(items, func(i, j int) bool {
 		ri, rj := 0.0, 0.0
@@ -736,5 +736,5 @@ func SortItemsByRemaining(items []QuotaItem) {
 	})
 }
 
-// 保证 strconv 引用（防御未来删改）
+// Référence défensive pour strconv
 var _ = strconv.Itoa

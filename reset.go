@@ -12,27 +12,27 @@ import (
 	"github.com/google/uuid"
 )
 
-// ---- Coding Plan 配额手动重置（app.asar 审计发现）----
-// base = zcode.z.ai；仅付费 Coding Plan 账号可用（Start Plan 返回 3101）。
-// 额度耗尽时可消耗「5 小时窗口重置」或「周重置」机会恢复配额。
-// 请求头（createCodingPlanResetHeaders 移植）：
+// ---- Réinitialisation manuelle du quota Coding Plan (découverte par audit app.asar) ----
+// base = zcode.z.ai ; accessible uniquement aux comptes Coding Plan payants (Start Plan renvoie 3101).
+// Permet de consommer une opportunité de « réinitialisation de fenêtre 5h » ou « réinitialisation hebdo » pour restaurer le quota.
+// En-têtes de requête (portage de createCodingPlanResetHeaders) :
 //   Authorization: Bearer <zcodejwttoken>
 //   X-Bigmodel-Authorization: <coding-plan apiKey>
-//   Bigmodel-Target-Type: PERSONAL | TEAM（TEAM 时附 Organization/Project）
+//   Bigmodel-Target-Type: PERSONAL | TEAM (avec Organization/Project en mode TEAM)
 
 const CodingPlanResetBase = "https://zcode.z.ai/api/v1/coding-plan/reset"
 
-// ResetSlot 重置机会槽位
+// ResetSlot créneau d'opportunité de réinitialisation
 type ResetSlot struct {
 	ExpireAt int64 `json:"expire_at"`
 }
 
-// ResetUsed 重置历史
+// ResetUsed historique d'utilisation de réinitialisation
 type ResetUsed struct {
 	UsedAt int64 `json:"used_at"`
 }
 
-// ResetStatus 重置状态
+// ResetStatus état des réinitialisations
 type ResetStatus struct {
 	AvailableFiveHourResets  []ResetSlot `json:"available_five_hour_resets"`
 	AvailableWeekResets      []ResetSlot `json:"available_week_resets"`
@@ -41,7 +41,7 @@ type ResetStatus struct {
 	HasUnreadHistory         bool        `json:"has_unread_history"`
 }
 
-// resetHeaders AC() 移植：双凭证 + 团队上下文
+// resetHeaders portage de AC() : double identifiant + contexte d'équipe
 func (z *ZCodeAPI) resetHeaders(a *Account) map[string]string {
 	h := map[string]string{
 		"Authorization": "Bearer " + a.ZCodeJWT,
@@ -51,7 +51,7 @@ func (z *ZCodeAPI) resetHeaders(a *Account) map[string]string {
 	if a.APIKey != "" {
 		h["X-Bigmodel-Authorization"] = a.APIKey
 	}
-	// 团队上下文：账号备注/分组中以 team:orgId:projId 形式声明时启用
+	// Contexte d'équipe : activé lorsque la note ou le groupe du compte est au format team:orgId:projId
 	if org, proj, ok := parseTeamContext(a); ok {
 		h["Bigmodel-Target-Type"] = "TEAM"
 		h["Bigmodel-Organization"] = org
@@ -62,7 +62,7 @@ func (z *ZCodeAPI) resetHeaders(a *Account) map[string]string {
 	return h
 }
 
-// parseTeamContext 从账号备注解析 team:<orgId>:<projId>
+// parseTeamContext extrait team:<orgId>:<projId> depuis la note du compte
 func parseTeamContext(a *Account) (org, proj string, ok bool) {
 	var t struct {
 		Team struct {
@@ -108,7 +108,7 @@ func (z *ZCodeAPI) resetRequest(a *Account, method, path string, body map[string
 // FetchResetStatus GET reset/status
 func (z *ZCodeAPI) FetchResetStatus(a *Account) (*ResetStatus, int, string, error) {
 	if a.ZCodeJWT == "" {
-		return nil, 0, "", fmt.Errorf("需要 ZCode JWT")
+		return nil, 0, "", fmt.Errorf("JWT ZCode requis")
 	}
 	v, status, err := z.resetRequest(a, "GET", "/status", nil)
 	if err != nil {
@@ -116,11 +116,11 @@ func (z *ZCodeAPI) FetchResetStatus(a *Account) (*ResetStatus, int, string, erro
 	}
 	code := jsonInt(v, "code")
 	if code != 0 {
-		return nil, status, firstNonEmpty(jsonStr(v, "msg"), jsonStr(v, "message")), fmt.Errorf("业务码 %d: %s", code, firstNonEmpty(jsonStr(v, "msg"), jsonStr(v, "message")))
+		return nil, status, firstNonEmpty(jsonStr(v, "msg"), jsonStr(v, "message")), fmt.Errorf("Code métier %d : %s", code, firstNonEmpty(jsonStr(v, "msg"), jsonStr(v, "message")))
 	}
 	data, _ := v["data"].(map[string]interface{})
 	if data == nil {
-		return nil, status, "", fmt.Errorf("响应缺少 data")
+		return nil, status, "", fmt.Errorf("data manquant dans la réponse")
 	}
 	raw, _ := json.Marshal(data)
 	var st ResetStatus
@@ -141,7 +141,7 @@ func (z *ZCodeAPI) UseReset(a *Account, resetType string) (bool, int64, string, 
 	code := jsonInt(v, "code")
 	msg := firstNonEmpty(jsonStr(v, "msg"), jsonStr(v, "message"))
 	if code != 0 {
-		return false, 0, msg, fmt.Errorf("业务码 %d: %s", code, msg)
+		return false, 0, msg, fmt.Errorf("Code métier %d : %s", code, msg)
 	}
 	data, _ := v["data"].(map[string]interface{})
 	used := false
@@ -151,7 +151,7 @@ func (z *ZCodeAPI) UseReset(a *Account, resetType string) (bool, int64, string, 
 	return used, 0, msg, nil
 }
 
-// RequestResetOpportunity POST reset/opportunity（3301=机会授予）
+// RequestResetOpportunity POST reset/opportunity (3301 = opportunité accordée)
 func (z *ZCodeAPI) RequestResetOpportunity(a *Account) (granted bool, nextTry int64, msg string, err error) {
 	idem := uuid.NewString()
 	v, status, err := z.resetRequest(a, "POST", "/opportunity", map[string]interface{}{
@@ -161,31 +161,31 @@ func (z *ZCodeAPI) RequestResetOpportunity(a *Account) (granted bool, nextTry in
 		return false, 0, "", err
 	}
 	if status == 429 {
-		return false, 0, "重置机会请求被限流", fmt.Errorf("HTTP 429 throttled")
+		return false, 0, "Demande d'opportunité de réinitialisation limitée", fmt.Errorf("HTTP 429 throttled")
 	}
 	code := jsonInt(v, "code")
 	data, _ := v["data"].(map[string]interface{})
 	if d, ok := data["granted"].(bool); ok && d {
-		return true, 0, firstNonEmpty(jsonStr(v, "msg"), "机会已授予"), nil
+		return true, 0, firstNonEmpty(jsonStr(v, "msg"), "Opportunité accordée"), nil
 	}
 	if d, ok := data["granted"].(bool); ok && !d {
 		if n := jsonNum(data, "next_try_at"); n != nil {
-			return false, int64(*n) * 1000, "机会未授予", nil
+			return false, int64(*n) * 1000, "Opportunité non accordée", nil
 		}
-		return false, 0, "机会未授予", nil
+		return false, 0, "Opportunité non accordée", nil
 	}
 	if code == 3301 {
-		return true, 0, "机会已授予（3301）", nil
+		return true, 0, "Opportunité accordée (3301)", nil
 	}
-	return false, 0, firstNonEmpty(jsonStr(v, "msg"), jsonStr(v, "message")), fmt.Errorf("业务码 %d", code)
+	return false, 0, firstNonEmpty(jsonStr(v, "msg"), jsonStr(v, "message")), fmt.Errorf("Code métier %d", code)
 }
 
-// ResetForAccount 组合流程：查状态 → 选 five_hour 优先否则 week → use → 刷新额度 → 落记录。
-// 账号级互斥：手动 + cron 并发时不会双重消耗重置机会。
+// ResetForAccount flux combiné : état -> five_hour en priorité sinon week -> use -> actualisation quota -> enregistrement.
+// Mutex par compte : empêche la double consommation en cas de concurrence manuel + cron.
 func (z *ZCodeAPI) ResetForAccount(a *Account) *ClaimResult {
 	mu := z.claimLockFor(a.ID)
 	if !mu.TryLock() {
-		return &ClaimResult{Code: -1, Message: "该账号已有领取/重置任务在执行中（本地互斥）"}
+		return &ClaimResult{Code: -1, Message: "Une tâche de récupération/réinitialisation est déjà en cours sur ce compte"}
 	}
 	defer mu.Unlock()
 	return z.resetForAccountLocked(a)
@@ -195,7 +195,7 @@ func (z *ZCodeAPI) resetForAccountLocked(a *Account) *ClaimResult {
 	record := &ClaimRecord{AccountID: a.ID, Email: a.Email, TaskType: "reset"}
 	st, _, bizMsg, err := z.FetchResetStatus(a)
 	if err != nil {
-		record.Message = fmt.Sprintf("重置状态查询失败: %v", err)
+		record.Message = fmt.Sprintf("Échec de requête du statut de réinitialisation : %v", err)
 		if bizMsg != "" {
 			record.Message = bizMsg
 		}
@@ -211,20 +211,20 @@ func (z *ZCodeAPI) resetForAccountLocked(a *Account) *ClaimResult {
 	}
 	if resetType == "" {
 		record.Success = true
-		record.Message = "无可用重置机会（five_hour/week 均已用完）"
+		record.Message = "Aucune opportunité de réinitialisation disponible (5h/hebdo épuisées)"
 		z.db.InsertClaimRecord(record)
 		return &ClaimResult{OK: true, Message: record.Message}
 	}
 	used, _, msg, err := z.UseReset(a, resetType)
 	if err != nil || !used {
-		record.Message = fmt.Sprintf("重置执行失败(%s): %v %s", resetType, err, msg)
+		record.Message = fmt.Sprintf("Échec d'exécution de la réinitialisation (%s) : %v %s", resetType, err, msg)
 		z.db.InsertClaimRecord(record)
-		z.db.SetAccountClaimResult(a.ID, "配额重置", record.Message)
+		z.db.SetAccountClaimResult(a.ID, "Réinitialisation du quota", record.Message)
 		return &ClaimResult{Code: -1, Message: record.Message}
 	}
 	record.Success = true
-	record.PlanName = "配额重置(" + resetType + ")"
-	record.Message = "重置成功，配额已恢复"
+	record.PlanName = "Réinitialisation du quota (" + resetType + ")"
+	record.Message = "Réinitialisation réussie, quota restauré"
 	z.db.InsertClaimRecord(record)
 	z.db.SetAccountClaimResult(a.ID, record.PlanName, record.Message)
 	log.Printf("[reset] account %s quota reset via %s", a.Email, resetType)
@@ -235,9 +235,9 @@ func (z *ZCodeAPI) resetForAccountLocked(a *Account) *ClaimResult {
 	return &ClaimResult{OK: true, PlanName: record.PlanName, Message: record.Message}
 }
 
-// ---- 官方模型目录同步（client/configs）----
+// ---- Synchronisation du catalogue officiel de modèles (client/configs) ----
 
-// CatalogModel 目录模型
+// CatalogModel modèle du catalogue
 type CatalogModel struct {
 	ModelID       string `json:"modelId"`
 	Name          string `json:"name"`
@@ -246,7 +246,7 @@ type CatalogModel struct {
 	Vision        bool   `json:"vision"`
 }
 
-// SyncModelCatalog 拉取官方模型目录（builtinModels）并刷新 captcha 配置缓存
+// SyncModelCatalog récupère le catalogue officiel (builtinModels) et rafraîchit le cache captcha
 func (z *ZCodeAPI) SyncModelCatalog() ([]CatalogModel, error) {
 	urlStr := fmt.Sprintf("%s?version=%s&os=%s", ClientConfigsURL, z.appVersion, NodePlatform())
 	client := ClientForURL("", urlStr, 20*time.Second)
@@ -274,10 +274,10 @@ func (z *ZCodeAPI) SyncModelCatalog() ([]CatalogModel, error) {
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &v); err != nil {
-		return nil, fmt.Errorf("目录解析失败: %w", err)
+		return nil, fmt.Errorf("Échec d'analyse du catalogue : %w", err)
 	}
 	if v.Code != 0 {
-		return nil, fmt.Errorf("业务码 %d: %s", v.Code, v.Msg)
+		return nil, fmt.Errorf("Code métier %d : %s", v.Code, v.Msg)
 	}
 	models := v.Data.BuiltinModels
 	if len(models) == 0 {
@@ -285,7 +285,7 @@ func (z *ZCodeAPI) SyncModelCatalog() ([]CatalogModel, error) {
 			models = append(models, p.Models...)
 		}
 	}
-	// 缓存目录 + 去重
+	// Mise en cache et déduplication
 	seen := map[string]bool{}
 	var uniq []CatalogModel
 	for _, m := range models {
@@ -302,7 +302,8 @@ func (z *ZCodeAPI) SyncModelCatalog() ([]CatalogModel, error) {
 	return uniq, nil
 }
 
-// GetModelCatalog 读取缓存目录
+// GetModelCatalog lit le catalogue en cache
+func (z *ZCodeAPI) GetModelCatalog() []CatalogModel {
 func (z *ZCodeAPI) GetModelCatalog() []CatalogModel {
 	raw, _ := z.db.GetSetting("model_catalog")
 	if raw == "" {

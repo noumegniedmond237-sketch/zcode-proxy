@@ -7,9 +7,9 @@ import (
 	"strings"
 )
 
-// ---- OpenAI 兼容端点 ----
-// POST /v1/chat/completions 与 POST /v1/responses：
-// 请求体转 Anthropic Messages 格式，内部一律流式请求上游，按客户端需求聚合或转 SSE。
+// ---- Points d'accès compatibles OpenAI ----
+// POST /v1/chat/completions et POST /v1/responses :
+// Corps de requête converti au format Anthropic Messages, envoyé en streaming vers l'amont, agrégé ou relayé en SSE selon la demande du client.
 
 // HandleChatCompletions POST /v1/chat/completions
 func (z *ZCodeAPI) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -34,7 +34,7 @@ func (z *ZCodeAPI) HandleChatCompletions(w http.ResponseWriter, r *http.Request)
 		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	anth["stream"] = true // 内部一律流式，按需聚合
+	anth["stream"] = true // Streaming systématique en interne, agrégation selon besoin
 	if err := normalizeBody(anth, z); err != nil {
 		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
@@ -60,7 +60,7 @@ func (z *ZCodeAPI) HandleChatCompletions(w http.ResponseWriter, r *http.Request)
 	z.relay(w, r, rc)
 }
 
-// HandleResponses POST /v1/responses（Codex / 新版 OpenAI SDK）
+// HandleResponses POST /v1/responses (Codex / nouveaux SDK OpenAI)
 func (z *ZCodeAPI) HandleResponses(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -104,7 +104,7 @@ func (z *ZCodeAPI) HandleResponses(w http.ResponseWriter, r *http.Request) {
 	z.relay(w, r, rc)
 }
 
-// asIfaceSlice 将 []interface{} 或 []map[string]interface{} 等切片统一为 []interface{}
+// asIfaceSlice unifie un slice []interface{} ou []map[string]interface{} en []interface{}
 func asIfaceSlice(v interface{}) []interface{} {
 	switch s := v.(type) {
 	case []interface{}:
@@ -124,7 +124,7 @@ func asIfaceSlice(v interface{}) []interface{} {
 	}
 }
 
-// ---- 请求体转换：OpenAI Chat → Anthropic Messages ----
+// ---- Conversion de requête : OpenAI Chat → Anthropic Messages ----
 
 func openaiToAnthropic(body map[string]interface{}) (map[string]interface{}, error) {
 	model, _ := body["model"].(string)
@@ -287,7 +287,7 @@ func openaiToAnthropic(body map[string]interface{}) (map[string]interface{}, err
 		}
 	}
 
-	// tools 转换
+	// Conversion des tools
 	if rawTools, ok := body["tools"].([]interface{}); ok {
 		var tools []map[string]interface{}
 		for _, t := range rawTools {
@@ -325,7 +325,7 @@ func openaiToAnthropic(body map[string]interface{}) (map[string]interface{}, err
 		}
 	}
 
-	// tool_choice 转换
+	// Conversion de tool_choice
 	switch tc := body["tool_choice"].(type) {
 	case string:
 		if tc == "auto" {
@@ -343,7 +343,7 @@ func openaiToAnthropic(body map[string]interface{}) (map[string]interface{}, err
 	return out, nil
 }
 
-// ---- 请求体转换：OpenAI Responses → Anthropic Messages ----
+// ---- Conversion de requête : OpenAI Responses → Anthropic Messages ----
 
 func responsesContentToText(content interface{}) string {
 	switch c := content.(type) {
@@ -471,7 +471,7 @@ func responsesToAnthropic(body map[string]interface{}) (map[string]interface{}, 
 	return openaiToAnthropic(chatBody)
 }
 
-// ---- 小工具 ----
+// ---- Utilitaires ----
 
 func toIfaceSlice(in []map[string]interface{}) []interface{} {
 	out := make([]interface{}, len(in))

@@ -10,13 +10,13 @@ import (
 	"time"
 )
 
-// ---- 活动计划调度器 ----
-// 5 段 cron（分 时 日 月 周）调度器：分钟级去重 + per-plan 互斥 + 账号间防风控延迟。
-// task_type: detect（检测活动）| claim（一键领取）| activate（激活套餐）
+// ---- Planificateur des plans d'activité ----
+// Planificateur cron à 5 segments (min heure jour mois semaine) : déduplication à la minute + mutex par plan + délai anti-risque entre comptes.
+// task_type: detect (détection d'activité) | claim (réclamation en un clic) | activate (activation du forfait)
 // target_type: all_accounts | single_account | group
-// 账号间延迟 delay_seconds + 随机抖动（防风控）。
+// Délai entre comptes delay_seconds + gigue aléatoire (anti-risque).
 
-// PlanRunState 计划实时运行状态（前端进度展示）
+// PlanRunState état d'exécution en temps réel d'un plan (affichage de progression côté frontend)
 type PlanRunState struct {
 	PlanID         int64  `json:"plan_id"`
 	PlanName       string `json:"plan_name"`
@@ -29,7 +29,7 @@ type PlanRunState struct {
 	StartedAt      string `json:"started_at"`
 }
 
-// CronScheduler cron 调度器
+// CronScheduler planificateur cron
 type CronScheduler struct {
 	db   *DB
 	zapi *ZCodeAPI
@@ -41,10 +41,10 @@ type CronScheduler struct {
 	running map[int64]*PlanRunState
 
 	execMu    sync.Mutex
-	execLocks map[int64]*sync.Mutex // per-plan 执行互斥（TryLock，拿不到跳过本 tick）
+	execLocks map[int64]*sync.Mutex // mutex d'exécution par plan (TryLock, si indisponible on saute ce tick)
 }
 
-// NewCronScheduler 创建调度器
+// NewCronScheduler crée le planificateur
 func NewCronScheduler(db *DB, zapi *ZCodeAPI) *CronScheduler {
 	return &CronScheduler{
 		db:        db,
@@ -55,7 +55,7 @@ func NewCronScheduler(db *DB, zapi *ZCodeAPI) *CronScheduler {
 	}
 }
 
-// planLock 返回计划级互斥锁
+// planLock renvoie le mutex au niveau du plan
 func (s *CronScheduler) planLock(id int64) *sync.Mutex {
 	s.execMu.Lock()
 	defer s.execMu.Unlock()
@@ -67,7 +67,7 @@ func (s *CronScheduler) planLock(id int64) *sync.Mutex {
 	return m
 }
 
-// Start 启动调度器（每分钟检查）
+// Start démarre le planificateur (vérification chaque minute)
 func (s *CronScheduler) Start() {
 	s.ticker = time.NewTicker(1 * time.Minute)
 	go func() {
@@ -84,7 +84,7 @@ func (s *CronScheduler) Start() {
 	}()
 }
 
-// Stop 停止调度器（幂等）
+// Stop arrête le planificateur (idempotent)
 func (s *CronScheduler) Stop() {
 	s.stopOnce.Do(func() {
 		if s.ticker != nil {
@@ -94,7 +94,7 @@ func (s *CronScheduler) Stop() {
 	})
 }
 
-// GetRunning 当前运行中的计划状态
+// GetRunning états des plans en cours d'exécution
 func (s *CronScheduler) GetRunning() []PlanRunState {
 	s.runMu.Lock()
 	defer s.runMu.Unlock()
@@ -123,7 +123,7 @@ func (s *CronScheduler) updateRunning(planID int64, fn func(*PlanRunState)) {
 	s.runMu.Unlock()
 }
 
-// checkAndRun 检查活跃计划并执行到期的
+// checkAndRun vérifie les plans actifs et exécute ceux arrivés à échéance
 func (s *CronScheduler) checkAndRun() {
 	plans, err := s.db.ListClaimPlans()
 	if err != nil {
@@ -138,7 +138,7 @@ func (s *CronScheduler) checkAndRun() {
 		if !shouldRun(plan.CronExpr, now) {
 			continue
 		}
-		// 分钟级去重：本分钟已触发过则跳过（executePlan 开始时即写 last_run_at）
+		// Déduplication à la minute : si déjà déclenché dans cette minute, on saute (last_run_at est écrit dès le début d'executePlan)
 		if plan.LastRunAt != "" {
 			if lastRun, err := time.Parse("2006-01-02 15:04:05", plan.LastRunAt); err == nil {
 				if lastRun.Truncate(time.Minute).Equal(now.Truncate(time.Minute)) {
@@ -150,30 +150,30 @@ func (s *CronScheduler) checkAndRun() {
 	}
 }
 
-// RunPlanNow 手动立即执行（UI 触发）；已在执行则拒绝排队
+// RunPlanNow exécution manuelle immédiate (déclenchée par l'UI) ; refusée si déjà en cours
 func (s *CronScheduler) RunPlanNow(planID int64) error {
 	plan, err := s.db.GetClaimPlan(planID)
 	if err != nil {
-		return fmt.Errorf("计划不存在: %d", planID)
+		return fmt.Errorf("Plan introuvable : %d", planID)
 	}
 	if !s.planLock(planID).TryLock() {
-		return fmt.Errorf("计划正在执行中，请稍后再试")
+		return fmt.Errorf("Plan en cours d'exécution, réessayez plus tard")
 	}
 	s.planLock(planID).Unlock()
 	go s.executePlan(plan)
 	return nil
 }
 
-// executePlan 执行计划（解析目标账号集合）
+// executePlan exécute le plan (résolution de l'ensemble des comptes cibles)
 func (s *CronScheduler) executePlan(plan *ClaimPlan) {
 	lock := s.planLock(plan.ID)
 	if !lock.TryLock() {
-		return // 已有执行在跑，跳过（不排队堆积）
+		return // une exécution est déjà en cours, on saute (pas d'accumulation en file)
 	}
 	defer lock.Unlock()
 
-	// 开始即写 last_run_at，避免长计划期间被重复触发
-	s.db.UpdateClaimPlanRun(plan.ID, "running", "执行中")
+	// last_run_at est écrit dès le début pour éviter un déclenchement répété pendant un plan long
+	s.db.UpdateClaimPlanRun(plan.ID, "running", "En cours d'exécution")
 
 	targets, err := s.resolveTargets(plan)
 	if err != nil {
@@ -181,7 +181,7 @@ func (s *CronScheduler) executePlan(plan *ClaimPlan) {
 		return
 	}
 	if len(targets) == 0 {
-		s.db.UpdateClaimPlanRun(plan.ID, "failed", "没有符合条件的账号")
+		s.db.UpdateClaimPlanRun(plan.ID, "failed", "Aucun compte correspondant aux critères")
 		return
 	}
 
@@ -203,7 +203,7 @@ func (s *CronScheduler) executePlan(plan *ClaimPlan) {
 	successCount, failCount := 0, 0
 	for i, a := range targets {
 		if i > 0 && plan.DelaySeconds > 0 {
-			// 固定延迟 + 0~50% 随机抖动，模拟人工
+			// Délai fixe + gigue aléatoire de 0~50 % pour simuler un humain
 			jitter := rand.Intn(plan.DelaySeconds/2 + 1)
 			sleep := plan.DelaySeconds + jitter
 			log.Printf("[scheduler] plan #%d: sleep %ds before %s", plan.ID, sleep, a.DisplayNameOrEmail())
@@ -230,7 +230,7 @@ func (s *CronScheduler) executePlan(plan *ClaimPlan) {
 	if successCount == 0 {
 		status = "failed"
 	}
-	summary := fmt.Sprintf("%d/%d 成功: %s", successCount, len(targets), strings.Join(results, "; "))
+	summary := fmt.Sprintf("%d/%d réussis : %s", successCount, len(targets), strings.Join(results, "; "))
 	if len(summary) > 900 {
 		summary = summary[:900] + "…"
 	}
@@ -245,7 +245,7 @@ func (s *CronScheduler) executePlan(plan *ClaimPlan) {
 	log.Printf("[scheduler] plan #%d done: %s", plan.ID, status)
 }
 
-// resolveTargets 按计划目标类型解析账号列表
+// resolveTargets résout la liste des comptes selon le type de cible du plan
 func (s *CronScheduler) resolveTargets(plan *ClaimPlan) ([]*Account, error) {
 	switch plan.TargetType {
 	case "single_account":
@@ -256,7 +256,7 @@ func (s *CronScheduler) resolveTargets(plan *ClaimPlan) ([]*Account, error) {
 		return []*Account{a}, nil
 	case "group":
 		if plan.AccountGroup == "" {
-			return nil, fmt.Errorf("分组目标缺少组名")
+			return nil, fmt.Errorf("Cible de groupe sans nom de groupe")
 		}
 		all, err := s.db.ListAccounts(plan.AccountGroup)
 		if err != nil {
@@ -272,7 +272,7 @@ func (s *CronScheduler) resolveTargets(plan *ClaimPlan) ([]*Account, error) {
 	}
 }
 
-// filterRunnable 过滤可执行任务的账号：启用 + 非 invalid/disabled + 有 JWT
+// filterRunnable filtre les comptes exécutables : activés + non invalid/disabled + avec JWT
 func filterRunnable(in []*Account) []*Account {
 	var out []*Account
 	for _, a := range in {
@@ -287,7 +287,7 @@ func filterRunnable(in []*Account) []*Account {
 	return out
 }
 
-// executeTask 按任务类型分发
+// executeTask distribue selon le type de tâche
 func (s *CronScheduler) executeTask(taskType string, a *Account) *ClaimResult {
 	switch taskType {
 	case "detect":
@@ -301,9 +301,9 @@ func (s *CronScheduler) executeTask(taskType string, a *Account) *ClaimResult {
 	}
 }
 
-// ---- Cron 表达式解析（5 段：分 时 日 月 周）----
+// ---- Analyse des expressions cron (5 segments : min heure jour mois semaine) ----
 
-// shouldRun 判断 cron 表达式在给定时间是否触发
+// shouldRun détermine si l'expression cron se déclenche à l'instant donné
 func shouldRun(cronExpr string, now time.Time) bool {
 	fields := strings.Fields(strings.TrimSpace(cronExpr))
 	if len(fields) != 5 {
@@ -405,17 +405,17 @@ func matchStep(field string, value, min, max int) bool {
 	return (value-start)%step == 0
 }
 
-// ValidateCronExpr 校验 cron 表达式
+// ValidateCronExpr valide l'expression cron
 func ValidateCronExpr(expr string) error {
 	fields := strings.Fields(strings.TrimSpace(expr))
 	if len(fields) != 5 {
-		return fmt.Errorf("cron 表达式必须为 5 段（分 时 日 月 周），当前 %d 段", len(fields))
+		return fmt.Errorf("L'expression cron doit comporter 5 segments (min heure jour mois semaine), actuellement %d", len(fields))
 	}
 	ranges := []struct{ min, max int }{{0, 59}, {0, 23}, {1, 31}, {1, 12}, {0, 6}}
-	labels := []string{"分钟", "小时", "日", "月", "周"}
+	labels := []string{"minute", "heure", "jour", "mois", "semaine"}
 	for i, f := range fields {
 		if err := validateCronField(f, ranges[i].min, ranges[i].max); err != nil {
-			return fmt.Errorf("%s字段: %w", labels[i], err)
+			return fmt.Errorf("champ %s : %w", labels[i], err)
 		}
 	}
 	return nil
@@ -424,7 +424,7 @@ func ValidateCronExpr(expr string) error {
 func validateCronField(field string, min, max int) error {
 	field = strings.TrimSpace(field)
 	if field == "" {
-		return fmt.Errorf("空字段")
+		return fmt.Errorf("Champ vide")
 	}
 	if field == "*" {
 		return nil
@@ -432,11 +432,11 @@ func validateCronField(field string, min, max int) error {
 	if strings.Contains(field, "/") {
 		parts := strings.SplitN(field, "/", 2)
 		if len(parts) != 2 {
-			return fmt.Errorf("步进格式错误")
+			return fmt.Errorf("Format d'incrément invalide")
 		}
 		step, err := strconv.Atoi(strings.TrimSpace(parts[1]))
 		if err != nil || step <= 0 {
-			return fmt.Errorf("步进值无效")
+			return fmt.Errorf("Valeur d'incrément invalide")
 		}
 		rangePart := strings.TrimSpace(parts[0])
 		if rangePart == "*" {
@@ -455,29 +455,29 @@ func validateCronField(field string, min, max int) error {
 	if strings.Contains(field, "-") {
 		parts := strings.SplitN(field, "-", 2)
 		if len(parts) != 2 {
-			return fmt.Errorf("范围格式错误")
+			return fmt.Errorf("Format de plage invalide")
 		}
 		start, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
 		end, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
 		if err1 != nil || err2 != nil {
-			return fmt.Errorf("范围无效: %s", field)
+			return fmt.Errorf("Plage invalide : %s", field)
 		}
 		if start < min || end > max || start > end {
-			return fmt.Errorf("范围 %d-%d 超出 [%d-%d]", start, end, min, max)
+			return fmt.Errorf("Plage %d-%d hors de [%d-%d]", start, end, min, max)
 		}
 		return nil
 	}
 	n, err := strconv.Atoi(field)
 	if err != nil {
-		return fmt.Errorf("无效数字: %s", field)
+		return fmt.Errorf("Nombre invalide : %s", field)
 	}
 	if n < min || n > max {
-		return fmt.Errorf("值 %d 超出 [%d-%d]", n, min, max)
+		return fmt.Errorf("Valeur %d hors de [%d-%d]", n, min, max)
 	}
 	return nil
 }
 
-// NextRunTime 计算下次触发时间（前端展示）
+// NextRunTime calcule la prochaine date de déclenchement (affichage frontend)
 func NextRunTime(cronExpr string, from time.Time) time.Time {
 	t := from.Truncate(time.Minute).Add(time.Minute)
 	limit := t.Add(366 * 24 * time.Hour)

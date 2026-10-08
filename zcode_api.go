@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-// ---- ZCode 上游 API 封装 ----
-// 持有账号池 / 验证码服务 / 出口代理，提供额度刷新、活动领取、聊天转发。
+// ---- Wrapper de l'API amont ZCode ----
+// Gère le pool de comptes / le service captcha / le proxy de sortie, et fournit l'actualisation des quotas, la récupération des offres et le relais des requêtes.
 
 type ZCodeAPI struct {
 	cfg        *FileConfig
@@ -21,10 +21,10 @@ type ZCodeAPI struct {
 	appVersion string
 
 	claimMu    sync.Mutex
-	claimLocks map[int64]*sync.Mutex // 账号级领取互斥（防 UI+cron 并发双领）
+	claimLocks map[int64]*sync.Mutex // Mutex par compte pour la réclamation (évite la double réclamation concurrentielle UI + cron)
 }
 
-// NewZCodeAPI 创建上游 API 封装，并把额度刷新函数注入账号池
+// NewZCodeAPI crée le wrapper de l'API amont et injecte la fonction de rafraîchissement des quotas dans le pool de comptes
 func NewZCodeAPI(cfg *FileConfig, db *DB, pool *AccountPool, captcha *CaptchaService, appVersion string) *ZCodeAPI {
 	z := &ZCodeAPI{
 		cfg:        cfg,
@@ -39,7 +39,7 @@ func NewZCodeAPI(cfg *FileConfig, db *DB, pool *AccountPool, captcha *CaptchaSer
 	return z
 }
 
-// RefreshAccountQuota 拉取额度 → 应用状态迁移 → 落库
+// RefreshAccountQuota récupère le quota -> applique la transition d'état -> enregistre en base
 func (z *ZCodeAPI) RefreshAccountQuota(a *Account) error {
 	ov, err := z.FetchQuotaRaw(a)
 	if err != nil {
@@ -49,19 +49,19 @@ func (z *ZCodeAPI) RefreshAccountQuota(a *Account) error {
 	return nil
 }
 
-// applyQuotaResult 根据额度结果驱动状态机（quota.py 状态迁移移植）
+// applyQuotaResult pilote la machine d'état selon le résultat du quota (portage de la transition d'état de quota.py)
 func (z *ZCodeAPI) applyQuotaResult(a *Account, ov *QuotaOverview) {
 	switch {
 	case ov.AuthFailed:
-		z.pool.MarkInvalid(a, "额度接口鉴权失败（401/403），凭证可能已过期")
+		z.pool.MarkInvalid(a, "Échec d'authentification sur l'API de quota (401/403), identifiants peut-être expirés")
 		return
 	case ov.NotEntitled:
-		z.pool.MarkInactive(a, "Coding Plan 未激活（不存在订阅资格）")
+		z.pool.MarkInactive(a, "Coding Plan non activé (aucun abonnement éligible)")
 		return
 	case ov.AllExhausted():
-		z.pool.MarkExhausted(a, "额度已用完")
+		z.pool.MarkExhausted(a, "Quota épuisé")
 	default:
-		// 有剩余额度：cooling 到期 / exhausted / inactive / invalid（凭证其实有效）恢复 active
+		// S'il reste du quota : cooling expiré / exhausted / inactive / invalid redevient active
 		if a.Status == StatusExhausted || a.Status == StatusInactive || a.Status == StatusInvalid ||
 			(a.Status == StatusCooling && (a.CoolingUntil <= 0 || time.Now().Unix() >= a.CoolingUntil)) {
 			a.Status = StatusActive
@@ -72,7 +72,7 @@ func (z *ZCodeAPI) applyQuotaResult(a *Account, ov *QuotaOverview) {
 		}
 	}
 
-	// 持久化额度快照
+	// Persistance de l'instantané de quota
 	quotaJSON, _ := json.Marshal(ov)
 	total, used, remaining := 0.0, 0.0, 0.0
 	if ov.Total != nil {
@@ -96,8 +96,8 @@ func (z *ZCodeAPI) applyQuotaResult(a *Account, ov *QuotaOverview) {
 	}
 }
 
-// HandleCountTokens POST /v1/messages/count_tokens — Anthropic SDK 会探测该端点。
-// 网关不做精确 tokenize，返回保守估计（字符数/4 + 消息开销），避免 SDK 报 405。
+// HandleCountTokens POST /v1/messages/count_tokens — sondé par le SDK Anthropic.
+// La passerelle renvoie une estimation prudente (nb caractères/4 + overhead) pour éviter une erreur 405.
 func (z *ZCodeAPI) HandleCountTokens(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -114,10 +114,10 @@ func (z *ZCodeAPI) HandleCountTokens(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"input_tokens": est})
 }
 
-// HandleModels GET /v1/models — 同时兼容 OpenAI 与 Anthropic 字段
+// HandleModels GET /v1/models — compatible simultanément avec les champs OpenAI et Anthropic
 func (z *ZCodeAPI) HandleModels(w http.ResponseWriter, r *http.Request) {
 	models := z.cfg.GetModels()
-	// DB 设置可覆盖模型清单
+	// La configuration en base peut surcharger la liste des modèles
 	if extra, _ := z.db.GetSetting("gateway_models"); strings.TrimSpace(extra) != "" {
 		var list []string
 		for _, m := range strings.Split(extra, ",") {
@@ -134,8 +134,16 @@ func (z *ZCodeAPI) HandleModels(w http.ResponseWriter, r *http.Request) {
 	for _, m := range models {
 		data = append(data, map[string]interface{}{
 			"id":           m,
-			"object":       "model", // OpenAI 客户端校验字段
-			"type":         "model", // Anthropic 客户端校验字段
+			"object":       "model", // Champ validé par les clients OpenAI
+			"type":         "model", // Champ validé par les clients Anthropic
+			"display_name": m,
+			"created":      now,
+			"created_at":   "2025-01-01T00:00:00Z",
+			"owned_by":     "zcode-proxy",
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"object": "list", "data": data})
+}
 			"display_name": m,
 			"created":      now,
 			"created_at":   "2025-01-01T00:00:00Z",

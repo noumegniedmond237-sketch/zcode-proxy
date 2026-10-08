@@ -17,10 +17,10 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// ---- Web 管理界面认证 ----
-// /api/* 使用 session 认证（/api/login 除外）
-// /v1/* 使用 API Key 认证（sk- 前缀）
-// /web 页面与 /oauth/callback 始终可访问
+// ---- Authentification de l'interface Web ----
+// /api/* utilise une authentification par session (sauf /api/login)
+// /v1/* utilise une clé API (préfixe sk-)
+// La page /web et le callback /oauth/callback sont toujours accessibles
 
 const (
 	sessionCookieName = "zcode_session"
@@ -33,7 +33,7 @@ type sessionEntry struct {
 	expiresAt time.Time
 }
 
-// AuthManager 认证管理器
+// AuthManager gestionnaire d'authentification
 type AuthManager struct {
 	mu          sync.RWMutex
 	sessions    map[string]*sessionEntry
@@ -41,7 +41,7 @@ type AuthManager struct {
 	db          *DB
 
 	failMu   sync.Mutex
-	failures map[string]*loginFail // 登录失败限速：key = ip|user
+	failures map[string]*loginFail // Limitation du débit des échecs : key = ip|user
 }
 
 type loginFail struct {
@@ -55,7 +55,7 @@ const (
 	loginLockMax  = 30 * time.Minute
 )
 
-// NewAuthManager 创建认证管理器（默认 admin/admin，可用环境变量覆盖）
+// NewAuthManager crée le gestionnaire d'authentification (admin/admin par défaut, surchargeable via variable d'environnement)
 func NewAuthManager(db *DB, password string) *AuthManager {
 	if password == "" {
 		password = "admin"
@@ -68,7 +68,7 @@ func NewAuthManager(db *DB, password string) *AuthManager {
 	}
 }
 
-// hashPassword bcrypt 哈希（新口令）
+// hashPassword hachage bcrypt (nouveau mot de passe)
 func hashPassword(pwd string) string {
 	h, err := bcrypt.GenerateFromPassword([]byte(pwd), bcrypt.DefaultCost)
 	if err != nil {
@@ -77,13 +77,13 @@ func hashPassword(pwd string) string {
 	return string(h)
 }
 
-// legacyHash 旧版无盐 SHA-256（仅用于透明迁移比对）
+// legacyHash ancien SHA-256 sans sel (uniquement pour migration transparente)
 func legacyHash(pwd string) string {
 	h := sha256.Sum256([]byte(pwd))
 	return hex.EncodeToString(h[:])
 }
 
-// verifyPassword 校验口令；旧 SHA-256 哈希命中后透明升级为 bcrypt
+// verifyPassword vérifie le mot de passe ; met à niveau vers bcrypt si ancien SHA-256
 func (am *AuthManager) verifyPassword(pwd string) bool {
 	stored := ""
 	if am.db != nil {
@@ -103,7 +103,7 @@ func (am *AuthManager) verifyPassword(pwd string) bool {
 	return pwd == am.fallbackPwd
 }
 
-// checkLoginRate 登录限速：锁定中返回剩余时长
+// checkLoginRate limitation du débit de connexion : renvoie la durée restante si verrouillé
 func (am *AuthManager) checkLoginRate(key string) time.Duration {
 	am.failMu.Lock()
 	defer am.failMu.Unlock()
@@ -117,7 +117,7 @@ func (am *AuthManager) checkLoginRate(key string) time.Duration {
 	return 0
 }
 
-// recordLoginFail 记录失败并按指数退避锁定
+// recordLoginFail enregistre un échec et verrouille selon un recul exponentiel
 func (am *AuthManager) recordLoginFail(key string) {
 	am.failMu.Lock()
 	defer am.failMu.Unlock()
@@ -168,7 +168,7 @@ func generateToken() string {
 	return hex.EncodeToString(b)
 }
 
-// GenerateAPIKey 生成 sk- 前缀 API Key
+// GenerateAPIKey génère une clé API avec le préfixe sk-
 func GenerateAPIKey() string {
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {
@@ -177,7 +177,7 @@ func GenerateAPIKey() string {
 	return "sk-" + hex.EncodeToString(b)
 }
 
-// Login 验证用户名密码，创建会话（带 IP+用户名 限速）
+// Login vérifie les identifiants et crée une session (avec limitation par IP+nom d'utilisateur)
 func (am *AuthManager) Login(username, password, clientIP string) (string, bool, time.Duration) {
 	rateKey := clientIP + "|" + username
 	if wait := am.checkLoginRate(rateKey); wait > 0 {
@@ -225,7 +225,7 @@ func (am *AuthManager) IsValid(token string) bool {
 	return !time.Now().After(s.expiresAt)
 }
 
-// clientIP 提取客户端 IP（用于登录限速键）
+// clientIP extrait l'adresse IP du client
 func clientIP(r *http.Request) string {
 	if xf := r.Header.Get("X-Forwarded-For"); xf != "" {
 		return strings.TrimSpace(strings.Split(xf, ",")[0])
@@ -248,7 +248,7 @@ func extractToken(r *http.Request) string {
 	return ""
 }
 
-// ValidateAPIKey 校验 /v1 API Key
+// ValidateAPIKey valide la clé API /v1
 func (am *AuthManager) ValidateAPIKey(key string) bool {
 	if am.db == nil || key == "" {
 		return false
@@ -257,23 +257,23 @@ func (am *AuthManager) ValidateAPIKey(key string) bool {
 	if err != nil || stored == "" {
 		return false
 	}
-	// 常数时间比较，规避计时侧信道
+	// Comparaison en temps constant pour éviter les attaques temporelles
 	return subtle.ConstantTimeCompare([]byte(key), []byte(stored)) == 1
 }
 
-// Middleware 认证中间件
+// Middleware d'authentification
 func (am *AuthManager) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 
-		// 免认证路径：登录接口、健康检查、Web 页面、OAuth 环回回调
+		// Chemins sans authentification : connexion, santé, interface web, callback OAuth
 		if path == "/api/login" || path == "/health" ||
 			strings.HasPrefix(path, "/web") || strings.HasPrefix(path, "/oauth/") {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		// /v1/* 使用 API Key 认证（Authorization: Bearer 或 x-api-key）
+		// /v1/* utilise une clé API (Authorization: Bearer ou x-api-key)
 		if strings.HasPrefix(path, "/v1/") {
 			var apiKey string
 			if xKey := r.Header.Get("x-api-key"); xKey != "" {
@@ -300,7 +300,7 @@ func (am *AuthManager) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// /api/* 使用 session 认证
+		// /api/* utilise une session
 		if strings.HasPrefix(path, "/api/") {
 			token := extractToken(r)
 			if token == "" || !am.IsValid(token) {
@@ -327,7 +327,7 @@ func (am *AuthManager) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		if wait > 0 {
 			writeAPIError(w, http.StatusTooManyRequests,
-				fmt.Sprintf("登录尝试过于频繁，请 %d 秒后再试", int(wait.Seconds())+1))
+				fmt.Sprintf("Trop de tentatives de connexion, réessayez dans %d secondes", int(wait.Seconds())+1))
 			return
 		}
 		writeAPIError(w, http.StatusUnauthorized, "invalid username or password")
@@ -425,7 +425,7 @@ func (am *AuthManager) HandleGenerateAPIKey(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]interface{}{"api_key": newKey, "message": "API key generated"})
 }
 
-// ---- HTTP 辅助 ----
+// ---- Fonctions HTTP utilitaires ----
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

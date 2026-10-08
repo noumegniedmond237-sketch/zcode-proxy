@@ -7,9 +7,10 @@ import (
 	"testing"
 )
 
-// TestEncV1Roundtrip enc:v1 加解密自洽
+// TestEncV1Roundtrip cohérence chiffrement/déchiffrement enc:v1
 func TestEncV1Roundtrip(t *testing.T) {
 	secret := "zcode-credential-fallback:win32:C:\\Users\\test:test"
+	// Donnée de test multilingue (UTF-8 multi-octets conservée pour valider le chiffrement)
 	for _, plain := range []string{"hello", "中文内容测试", `{"a":1}`, strings.Repeat("x", 500)} {
 		enc, err := EncryptCredential(plain, secret)
 		if err != nil {
@@ -31,12 +32,12 @@ func TestEncV1Roundtrip(t *testing.T) {
 	}
 }
 
-// TestEncV1CrossLanguageVector 与 zcode-switch 测试向量互操作
-// 向量来自 refs/zcode-switch/src-tauri/test-vectors/node-enc-v1.json（Node 客户端加密，Rust 解密验证）
+// TestEncV1CrossLanguageVector interopérabilité avec les vecteurs de test zcode-switch
+// Vecteur issu de refs/zcode-switch/src-tauri/test-vectors/node-enc-v1.json (chiffré côté Node, vérifié côté Rust)
 func TestEncV1CrossLanguageVector(t *testing.T) {
 	data, err := os.ReadFile(`refs\zcode-switch\src-tauri\test-vectors\node-enc-v1.json`)
 	if err != nil {
-		// 向量文件可能不存在于浅克隆，跳过
+		// Le fichier de vecteur peut manquer dans un clone superficiel, ignorer
 		t.Skipf("vector file missing: %v", err)
 	}
 	var v struct {
@@ -56,7 +57,7 @@ func TestEncV1CrossLanguageVector(t *testing.T) {
 	}
 }
 
-// TestDefaultSecretFormat 回退密钥格式
+// TestDefaultSecretFormat format du secret de secours
 func TestDefaultSecretFormat(t *testing.T) {
 	os.Unsetenv("ZCODE_CREDENTIAL_SECRET")
 	s := DefaultCredentialSecret(`C:\Users\john`)
@@ -68,7 +69,7 @@ func TestDefaultSecretFormat(t *testing.T) {
 	}
 }
 
-// TestLooksLikeJWT JWT 形状判定
+// TestLooksLikeJWT détection de la forme JWT
 func TestLooksLikeJWT(t *testing.T) {
 	if !LooksLikeJWT("eyJhbGci.eyJzdWIi.c2ln") {
 		t.Fatal("should be jwt")
@@ -81,7 +82,7 @@ func TestLooksLikeJWT(t *testing.T) {
 	}
 }
 
-// TestDecodeJWTPayload JWT payload 解析
+// TestDecodeJWTPayload analyse du payload JWT
 func TestDecodeJWTPayload(t *testing.T) {
 	// payload = {"user_id":"123456","sub":"s"}
 	jwt := "eyJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiMTIzNDU2Iiwic3ViIjoicyJ9.c2ln"

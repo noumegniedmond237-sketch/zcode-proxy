@@ -10,42 +10,42 @@ import (
 	"time"
 )
 
-// ---- JSON 文件配置（config/config.json，热重载）----
-// 运行期可变项（策略/代理/指纹/密码/APIKey）存 SQLite settings 表；
-// 这里只放部署级配置：监听地址、上游端点、模型清单、客户端版本号。
+// ---- Configuration fichier JSON (config/config.json, rechargement à chaud) ----
+// Les options modifiables à l'exécution (stratégie/proxy/empreinte/mot de passe/APIKey) sont stockées dans la table SQLite settings ;
+// ici uniquement la configuration de déploiement : adresse d'écoute, endpoints amont, liste de modèles, version client.
 
-// UpstreamURLs 上游端点（可被 config.json 覆盖，便于离线测试）
+// UpstreamURLs endpoints amont (surchageables via config.json, pratique pour les tests hors ligne)
 type UpstreamURLs struct {
-	Zai         string `json:"zai"`          // zcode.z.ai JWT 免费通道
-	ZaiFallback string `json:"zai_fallback"` // api.z.ai API Key 通道
+	Zai         string `json:"zai"`          // canal gratuit JWT zcode.z.ai
+	ZaiFallback string `json:"zai_fallback"` // canal API Key api.z.ai
 	Bigmodel    string `json:"bigmodel"`     // open.bigmodel.cn
 }
 
-// FileConfig config.json 结构
+// FileConfig structure de config.json
 type FileConfig struct {
 	ListenAddr string       `json:"listen_addr"`
-	AppVersion string       `json:"app_version"` // ZCode 客户端伪装版本号，空=自动探测注册表
-	Models     []string     `json:"models"`      // /v1/models 公布的模型清单
+	AppVersion string       `json:"app_version"` // Version client ZCode usurpée, vide = détection auto via registre
+	Models     []string     `json:"models"`      // liste de modèles publiée sur /v1/models
 	Upstream   UpstreamURLs `json:"upstream"`
 
 	configDir string
 	mu        sync.RWMutex
 }
 
-// DefaultUpstream 与 zcode2api settings.py 一致的默认端点
+// DefaultUpstream endpoints par défaut (alignés avec settings.py de zcode2api)
 var DefaultUpstream = UpstreamURLs{
 	Zai:         "https://zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages",
 	ZaiFallback: "https://api.z.ai/api/anthropic/v1/messages",
 	Bigmodel:    "https://open.bigmodel.cn/api/anthropic/v1/messages",
 }
 
-// DefaultModels 默认模型清单（上游大小写敏感，这里存官方名）
+// DefaultModels liste de modèles par défaut (casse sensible côté amont, noms officiels ici)
 var DefaultModels = []string{
 	"GLM-5.3", "GLM-5.2", "GLM-5-Turbo", "GLM-4.7", "GLM-4.6",
 	"GLM-4.5", "GLM-4.5-Air", "GLM-4.5V", "GLM-4.5-Flash",
 }
 
-// LoadFileConfig 加载配置目录；文件不存在时用默认值并落盘一份
+// LoadFileConfig charge le dossier de configuration ; si absent, valeurs par défaut + écriture sur disque
 func LoadFileConfig(configDir string) (*FileConfig, error) {
 	c := &FileConfig{configDir: configDir}
 	if err := c.reload(); err != nil {
@@ -62,7 +62,7 @@ func (c *FileConfig) reload() error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// 首次运行：写默认配置
+			// Première exécution : écrire la configuration par défaut
 			c.ListenAddr = "127.0.0.1:8687"
 			c.AppVersion = ""
 			c.Models = DefaultModels
@@ -80,7 +80,7 @@ func (c *FileConfig) reload() error {
 	c.AppVersion = fc.AppVersion
 	c.Models = fc.Models
 	c.Upstream = fc.Upstream
-	// 补默认值
+	// Compléter les valeurs par défaut
 	if c.ListenAddr == "" {
 		c.ListenAddr = "127.0.0.1:8687"
 	}
@@ -101,7 +101,7 @@ func (c *FileConfig) reload() error {
 
 func (c *FileConfig) writeDefaultLocked(path string) {
 	os.MkdirAll(filepath.Dir(path), 0755)
-	// 独立结构体序列化，避免复制 FileConfig 内的互斥锁
+	// Sérialisation via struct indépendante, évite de copier le mutex de FileConfig
 	out := struct {
 		ListenAddr string       `json:"listen_addr"`
 		AppVersion string       `json:"app_version"`
@@ -122,7 +122,7 @@ func (c *FileConfig) writeDefaultLocked(path string) {
 	}
 }
 
-// StartHotReload 定时热加载
+// StartHotReload rechargement à chaud périodique
 func (c *FileConfig) StartHotReload(interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	go func() {
@@ -134,28 +134,28 @@ func (c *FileConfig) StartHotReload(interval time.Duration) {
 	}()
 }
 
-// GetListenAddr 线程安全读取
+// GetListenAddr lecture thread-safe
 func (c *FileConfig) GetListenAddr() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.ListenAddr
 }
 
-// GetUpstream 线程安全读取
+// GetUpstream lecture thread-safe
 func (c *FileConfig) GetUpstream() UpstreamURLs {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.Upstream
 }
 
-// GetModels 线程安全读取
+// GetModels lecture thread-safe
 func (c *FileConfig) GetModels() []string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return append([]string{}, c.Models...)
 }
 
-// GetAppVersion 配置的版本号（空则调用方走自动探测）
+// GetAppVersion version configurée (vide = détection auto par l'appelant)
 func (c *FileConfig) GetAppVersion() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

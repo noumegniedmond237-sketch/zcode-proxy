@@ -17,13 +17,13 @@ import (
 	"golang.org/x/net/proxy"
 )
 
-// ---- 出口代理：SOCKS5 拨号器 / 组代理解析 / 健康测试 / 系统代理探测 ----
+// ---- Proxy de sortie : dialer SOCKS5 / résolution de proxy par groupe / test de santé / détection système ----
 
 type proxyContextDialer interface {
 	DialContext(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
-// Socks5Dialer 从 socks5://[user:pass@]host:port 创建支持 context 的拨号器
+// Socks5Dialer crée un dialer supportant le context à partir de socks5://[user:pass@]host:port
 func Socks5Dialer(u *url.URL) (proxy.Dialer, error) {
 	var auth *proxy.Auth
 	if u.User != nil {
@@ -36,17 +36,17 @@ func Socks5Dialer(u *url.URL) (proxy.Dialer, error) {
 	return proxy.SOCKS5("tcp", u.Host, auth, forward)
 }
 
-// EgressProxy 出口代理解析器：组绑定代理 → 默认代理 → 全局设置 → 直连
+// EgressProxy résolveur de proxy de sortie : lié au groupe -> par défaut -> global -> direct
 type EgressProxy struct {
 	db *DB
 }
 
-// NewEgressProxy 创建解析器
+// NewEgressProxy crée le résolveur
 func NewEgressProxy(db *DB) *EgressProxy {
 	return &EgressProxy{db: db}
 }
 
-// ProxyURLForAccount 解析账号应走的出口代理 URL（空=直连）
+// ProxyURLForAccount résout l'URL du proxy de sortie pour le compte (vide = direct)
 func (e *EgressProxy) ProxyURLForAccount(a *Account) string {
 	if a == nil {
 		return e.GlobalProxyURL()
@@ -60,25 +60,25 @@ func (e *EgressProxy) ProxyURLForAccount(a *Account) string {
 	return e.GlobalProxyURL()
 }
 
-// GlobalProxyURL 全局上游代理设置（settings KV upstream_proxy）
+// GlobalProxyURL paramètre de proxy amont global (settings KV upstream_proxy)
 func (e *EgressProxy) GlobalProxyURL() string {
 	v, _ := e.db.GetSetting("upstream_proxy")
 	return strings.TrimSpace(v)
 }
 
-// HTTPClientForAccount 按账号组构造 HTTP 客户端
+// HTTPClientForAccount construit le client HTTP selon le groupe du compte
 func (e *EgressProxy) HTTPClientForAccount(a *Account, timeout time.Duration) *http.Client {
 	return NewUpstreamHTTPClient(e.ProxyURLForAccount(a), timeout)
 }
 
-// ---- 健康测试：出口 IP ----
+// ---- Test de santé : IP de sortie ----
 
 var exitIPAPIs = []string{
 	"https://api.ipify.org/?format=json",
 	"https://ipinfo.io/json",
 }
 
-// TestProxyExitIP 测试代理连通性并返回出口 IP（proxyURL 空=直连基线）
+// TestProxyExitIP teste la connectivité du proxy et renvoie l'IP de sortie (proxyURL vide = connexion directe)
 func TestProxyExitIP(proxyURL string) (ip string, elapsed time.Duration, err error) {
 	client := NewUpstreamHTTPClient(proxyURL, 15*time.Second)
 	start := time.Now()
@@ -102,14 +102,14 @@ func TestProxyExitIP(proxyURL string) (ip string, elapsed time.Duration, err err
 		}
 	}
 	if err == nil {
-		err = fmt.Errorf("无法获取出口 IP")
+		err = fmt.Errorf("Impossible d'obtenir l'IP de sortie")
 	}
 	return "", time.Since(start), err
 }
 
-// ---- 系统代理探测（Windows 注册表）----
+// ---- Détection du proxy système (Registre Windows) ----
 
-// DetectSystemProxy 读取 Windows 系统代理设置
+// DetectSystemProxy lit les paramètres de proxy du système Windows
 func DetectSystemProxy() (enabled bool, proxyURL string) {
 	if runtime.GOOS != "windows" {
 		for _, env := range []string{"http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"} {
@@ -143,7 +143,7 @@ func DetectSystemProxy() (enabled bool, proxyURL string) {
 	if server == "" {
 		return false, ""
 	}
-	// ProxyServer 可能是 "host:port" 或 "http=...;https=...;socks=..."
+	// ProxyServer peut être "host:port" ou "http=...;https=...;socks=..."
 	if strings.Contains(server, "=") {
 		parts := map[string]string{}
 		for _, p := range strings.Split(server, ";") {
@@ -168,23 +168,23 @@ func DetectSystemProxy() (enabled bool, proxyURL string) {
 	return true, server
 }
 
-// ---- 本机代理端口探测（zcode2api proxy.py 移植）----
+// ---- Détection des ports de proxy locaux ----
 
 var probePorts = []int{7897, 7890, 7891, 7899, 1080, 10808, 2080, 8889, 8118}
 
 var portLabels = map[int]string{
-	7897:  "Clash Verge 混合端口（常见默认）",
-	7890:  "Clash 混合端口（常见默认）",
-	7891:  "Clash HTTP 端口",
-	7899:  "Clash Verge 备用端口",
-	1080:  "SOCKS5 通用端口",
-	10808: "v2rayN SOCKS 端口",
-	2080:  "sing-box 混合端口",
-	8889:  "HTTP 代理通用端口",
-	8118:  "Privoxy HTTP 端口",
+	7897:  "Port mixte Clash Verge (défaut fréquent)",
+	7890:  "Port mixte Clash (défaut fréquent)",
+	7891:  "Port HTTP Clash",
+	7899:  "Port secondaire Clash Verge",
+	1080:  "Port générique SOCKS5",
+	10808: "Port SOCKS v2rayN",
+	2080:  "Port mixte sing-box",
+	8889:  "Port proxy HTTP générique",
+	8118:  "Port HTTP Privoxy",
 }
 
-// ProbeLocalProxyPorts 并发探测本机常见代理内核端口
+// ProbeLocalProxyPorts teste simultanément les ports courants de proxy locaux
 func ProbeLocalProxyPorts() []map[string]interface{} {
 	type result struct {
 		port int
@@ -210,7 +210,7 @@ func ProbeLocalProxyPorts() []map[string]interface{} {
 		if byPort[p] {
 			label := portLabels[p]
 			if label == "" {
-				label = "本机代理端口"
+				label = "Port proxy local"
 			}
 			out = append(out, map[string]interface{}{
 				"url":   fmt.Sprintf("http://127.0.0.1:%d", p),
@@ -222,7 +222,7 @@ func ProbeLocalProxyPorts() []map[string]interface{} {
 	return out
 }
 
-// MaskProxyURL 脱敏展示代理地址（隐藏用户名密码）
+// MaskProxyURL masque l'URL du proxy (cache le nom d'utilisateur et mot de passe)
 func MaskProxyURL(raw string) string {
 	if raw == "" {
 		return ""

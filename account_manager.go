@@ -12,23 +12,23 @@ import (
 	"time"
 )
 
-// ---- 账号管理：本地客户端导入 / 粘贴导入 / 一键切回 ----
+// ---- Gestion des comptes : import du client local / import par collage / rebascule en un clic ----
 
-// AccountManager 账号来源管理
+// AccountManager gère les sources de comptes
 type AccountManager struct {
 	db    *DB
 	zapi  *ZCodeAPI
 	oauth *OAuthManager
 }
 
-// NewAccountManager 创建账号管理器
+// NewAccountManager crée le gestionnaire de comptes
 func NewAccountManager(db *DB, zapi *ZCodeAPI, oauth *OAuthManager) *AccountManager {
 	return &AccountManager{db: db, zapi: zapi, oauth: oauth}
 }
 
-// ---- 本地客户端导入 ----
+// ---- Import depuis le client local ----
 
-// localClientFiles 本地 ZCode 客户端相关文件路径
+// localClientFiles chemins des fichiers liés au client ZCode local
 type localClientFiles struct {
 	home        string
 	credentials string // ~/.zcode/v2/credentials.json
@@ -49,18 +49,18 @@ func resolveLocalClientFiles() localClientFiles {
 	}
 }
 
-// ImportFromLocalClient 从本机 ZCode 客户端导入当前登录账号。
-// 解密 credentials.json 提取 JWT/access_token/user_info；
-// 从 config.json 提取 coding-plan API Key；保留原始文件内容供一键切回。
+// ImportFromLocalClient importe le compte actuellement connecté depuis le client ZCode local.
+// Déchiffre credentials.json pour extraire JWT/access_token/user_info ;
+// extrait la API Key coding-plan de config.json ; conserve le contenu d'origine des fichiers pour la rebascule en un clic.
 func (m *AccountManager) ImportFromLocalClient(group string) (*Account, error) {
 	f := resolveLocalClientFiles()
 	credData, err := os.ReadFile(f.credentials)
 	if err != nil {
-		return nil, fmt.Errorf("读取本地凭证失败（ZCode 客户端可能未安装/未登录）: %w", err)
+		return nil, fmt.Errorf("Échec de lecture des identifiants locaux (client ZCode peut-être absent/non connecté) : %w", err)
 	}
 	var creds map[string]string
 	if err := json.Unmarshal(credData, &creds); err != nil {
-		return nil, fmt.Errorf("凭证文件解析失败: %w", err)
+		return nil, fmt.Errorf("Échec d'analyse du fichier d'identifiants : %w", err)
 	}
 
 	secret := DefaultCredentialSecret(f.home)
@@ -85,7 +85,7 @@ func (m *AccountManager) ImportFromLocalClient(group string) (*Account, error) {
 	accessToken := dec(fmt.Sprintf("oauth:%s:access_token", provider))
 	userInfo := dec(fmt.Sprintf("oauth:%s:user_info", provider))
 	if zcodeJWT == "" && accessToken == "" {
-		return nil, fmt.Errorf("本地凭证中没有可用的 ZCode 登录态（请先在 ZCode 客户端登录）")
+		return nil, fmt.Errorf("Aucune session ZCode valide dans les identifiants locaux (connectez-vous d'abord dans le client ZCode)")
 	}
 
 	// user_info → email/name/user_id
@@ -107,7 +107,7 @@ func (m *AccountManager) ImportFromLocalClient(group string) (*Account, error) {
 		}
 	}
 	if userID == "" {
-		return nil, fmt.Errorf("无法确定账号 user_id")
+		return nil, fmt.Errorf("Impossible de déterminer le user_id du compte")
 	}
 
 	// device_mid
@@ -121,7 +121,7 @@ func (m *AccountManager) ImportFromLocalClient(group string) (*Account, error) {
 		}
 	}
 
-	// config.json → coding-plan API Key（已是 {id}.{secret} 完整格式）
+	// config.json → API Key coding-plan (déjà au format complet {id}.{secret})
 	apiKey := ""
 	if cData, err := os.ReadFile(f.config); err == nil {
 		var cfg struct {
@@ -143,7 +143,7 @@ func (m *AccountManager) ImportFromLocalClient(group string) (*Account, error) {
 		}
 	}
 
-	// 原始凭证快照（供一键切回还原）
+	// Instantané des identifiants d'origine (pour restaurer la rebascule en un clic)
 	snapshot := map[string]string{
 		"credentials.json": string(credData),
 	}
@@ -167,20 +167,20 @@ func (m *AccountManager) ImportFromLocalClient(group string) (*Account, error) {
 		Status:      StatusActive,
 		Enabled:     true,
 		AccountGroup: group,
-		Remark:      "本地客户端导入",
+		Remark:      "Import du client local",
 	}
 	if zcodeJWT == "" {
 		a.AuthType = "apikey"
 	}
 	id, err := m.db.UpsertAccount(a)
 	if err != nil {
-		return nil, fmt.Errorf("账号入库失败: %w", err)
+		return nil, fmt.Errorf("Échec d'enregistrement du compte : %w", err)
 	}
 	a.ID = id
 	log.Printf("[import] local client account imported: %s (id=%d, jwt=%v, apikey=%v)",
 		email, id, zcodeJWT != "", apiKey != "")
 
-	// 异步刷新额度
+	// Actualisation asynchrone du quota
 	go func() {
 		time.Sleep(500 * time.Millisecond)
 		if err := m.zapi.RefreshAccountQuota(a); err != nil {
@@ -190,9 +190,9 @@ func (m *AccountManager) ImportFromLocalClient(group string) (*Account, error) {
 	return a, nil
 }
 
-// ---- 粘贴导入 ----
+// ---- Import par collage ----
 
-// LooksLikeJWT 判断凭证是否为 JWT 形状（3 段 base64url）
+// LooksLikeJWT vérifie si un identifiant a la forme d'un JWT (3 segments base64url)
 func LooksLikeJWT(secret string) bool {
 	parts := strings.Split(strings.TrimSpace(secret), ".")
 	if len(parts) != 3 {
@@ -211,18 +211,18 @@ func LooksLikeJWT(secret string) bool {
 	return true
 }
 
-// ImportPasted 粘贴 JWT 或 API Key 导入
+// ImportPasted importe un JWT ou une API Key collé
 func (m *AccountManager) ImportPasted(provider, name, secret, group string) (*Account, error) {
 	secret = strings.TrimSpace(secret)
 	if secret == "" {
-		return nil, fmt.Errorf("凭证不能为空")
+		return nil, fmt.Errorf("Les identifiants ne peuvent pas être vides")
 	}
 	if provider == "" {
 		provider = "zai"
 	}
 	isJWT := LooksLikeJWT(secret) && provider == "zai"
 
-	// user_id：JWT 解 payload；API Key 用哈希做自然键
+	// user_id : payload décodé du JWT ; pour une API Key, un hachage sert de clé naturelle
 	userID := ""
 	if isJWT {
 		if claims, err := DecodeJWTPayload(secret); err == nil {
@@ -242,7 +242,7 @@ func (m *AccountManager) ImportPasted(provider, name, secret, group string) (*Ac
 		Status:       StatusActive,
 		Enabled:      true,
 		AccountGroup: group,
-		Remark:       "粘贴导入",
+		Remark:       "Import par collage",
 	}
 	if isJWT {
 		a.AuthType = "jwt"
@@ -253,7 +253,7 @@ func (m *AccountManager) ImportPasted(provider, name, secret, group string) (*Ac
 	}
 	id, err := m.db.UpsertAccount(a)
 	if err != nil {
-		return nil, fmt.Errorf("账号入库失败: %w", err)
+		return nil, fmt.Errorf("Échec d'enregistrement du compte : %w", err)
 	}
 	a.ID = id
 
@@ -264,25 +264,25 @@ func (m *AccountManager) ImportPasted(provider, name, secret, group string) (*Ac
 	return a, nil
 }
 
-// ---- 一键切回本地客户端 ----
+// ---- Rebascule vers le client local en un clic ----
 
-// SwitchBackToLocal 把所选账号凭证写回本地 ZCode 客户端：
-//  1. 快照现有 credentials.json / config.json 到 data/backups/
-//  2. 重新 enc:v1 加密写回 credentials.json（原子替换）
-//  3. 更新 config.json 的 start-plan / coding-plan apiKey 与 enabled
-//  4. 删除 coding-plan-cache.json 强制客户端重新探测套餐
+// SwitchBackToLocal réécrit les identifiants du compte sélectionné dans le client ZCode local :
+//  1. instantané des credentials.json / config.json actuels dans data/backups/
+//  2. réécriture de credentials.json chiffré à nouveau en enc:v1 (remplacement atomique)
+//  3. mise à jour de l'apiKey start-plan / coding-plan et de enabled dans config.json
+//  4. suppression de coding-plan-cache.json pour forcer le client à re-détecter le forfait
 func (m *AccountManager) SwitchBackToLocal(accountID int64, killClient bool) error {
 	a, err := m.db.GetAccount(accountID)
 	if err != nil {
 		return err
 	}
 	if a.ZCodeJWT == "" {
-		return fmt.Errorf("该账号没有 ZCode JWT，无法切回本地客户端")
+		return fmt.Errorf("Ce compte n'a pas de JWT ZCode, rebascule vers le client local impossible")
 	}
 	f := resolveLocalClientFiles()
 	secret := DefaultCredentialSecret(f.home)
 
-	// 1. 备份（基于可执行文件目录，避免受工作目录影响）
+	// 1. Sauvegarde (basée sur le répertoire de l'exécutable, pour éviter l'influence du répertoire de travail)
 	backupDir := filepath.Join(exeDir(), "data", "backups")
 	os.MkdirAll(backupDir, 0755)
 	stamp := time.Now().Format("20060102-150405")
@@ -292,7 +292,7 @@ func (m *AccountManager) SwitchBackToLocal(accountID int64, killClient bool) err
 		}
 	}
 
-	// 2. 重建 credentials.json：保留无关键（bot/web-remote-control 等），只替换登录态
+	// 2. Reconstruction de credentials.json : conserve les clés non concernées (bot/web-remote-control, etc.), ne remplace que l'état de connexion
 	var creds map[string]string
 	if data, err := os.ReadFile(f.credentials); err == nil {
 		json.Unmarshal(data, &creds)
@@ -323,10 +323,10 @@ func (m *AccountManager) SwitchBackToLocal(accountID int64, killClient bool) err
 		creds["oauth:active_provider"] = v
 	}
 	if err := atomicWriteJSON(f.credentials, creds); err != nil {
-		return fmt.Errorf("写回 credentials.json 失败: %w", err)
+		return fmt.Errorf("Échec de réécriture de credentials.json : %w", err)
 	}
 
-	// 3. 更新 config.json provider
+	// 3. Mise à jour du provider dans config.json
 	var cfg map[string]interface{}
 	if data, err := os.ReadFile(f.config); err == nil {
 		if json.Unmarshal(data, &cfg) != nil {
@@ -360,22 +360,22 @@ func (m *AccountManager) SwitchBackToLocal(accountID int64, killClient bool) err
 		setProviderKey("builtin:"+provider+"-coding-plan", a.APIKey, true)
 	}
 	if err := atomicWriteJSON(f.config, cfg); err != nil {
-		return fmt.Errorf("写回 config.json 失败: %w", err)
+		return fmt.Errorf("Échec de réécriture de config.json : %w", err)
 	}
 
-	// 4. 清缓存强制重新探测
+	// 4. Purge du cache pour forcer une nouvelle détection
 	os.Remove(f.cache)
 
 	log.Printf("[switch-back] account %s written to local client", a.Email)
 
-	// 5. 可选：结束 ZCode 进程让改动生效
+	// 5. Optionnel : terminer le processus ZCode pour appliquer les changements
 	if killClient {
 		killZCodeProcess()
 	}
 	return nil
 }
 
-// atomicWriteJSON 临时文件 + rename 原子写
+// atomicWriteJSON écriture atomique via fichier temporaire + rename
 func atomicWriteJSON(path string, v interface{}) error {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
@@ -388,7 +388,7 @@ func atomicWriteJSON(path string, v interface{}) error {
 	return os.Rename(tmp, path)
 }
 
-// killZCodeProcess 结束本机 ZCode 客户端进程（平台实现见 proc_windows.go / proc_other.go）
+// killZCodeProcess termine le processus du client ZCode local (implémentation par plateforme : proc_windows.go / proc_other.go)
 func killZCodeProcess() {
 	out, err := killProcessByName("ZCode.exe")
 	if err != nil {
@@ -398,7 +398,7 @@ func killZCodeProcess() {
 	log.Printf("[switch-back] ZCode.exe terminated")
 }
 
-// exeDir 返回可执行文件所在目录（备份/数据路径基准）
+// exeDir renvoie le répertoire de l'exécutable (base des chemins de sauvegarde/données)
 func exeDir() string {
 	exe, err := os.Executable()
 	if err != nil {
@@ -407,18 +407,18 @@ func exeDir() string {
 	return filepath.Dir(exe)
 }
 
-// RestoreLocalFromSnapshot 用导入时的快照还原本地客户端（撤销切回）
+// RestoreLocalFromSnapshot restaure le client local depuis l'instantané d'import (annule la rebascule)
 func (m *AccountManager) RestoreLocalFromSnapshot(accountID int64) error {
 	a, err := m.db.GetAccount(accountID)
 	if err != nil {
 		return err
 	}
 	if a.CredsRaw == "" {
-		return fmt.Errorf("该账号没有本地凭证快照，无法还原")
+		return fmt.Errorf("Ce compte n'a pas d'instantané d'identifiants locaux, restauration impossible")
 	}
 	var snapshot map[string]string
 	if err := json.Unmarshal([]byte(a.CredsRaw), &snapshot); err != nil {
-		return fmt.Errorf("快照解析失败: %w", err)
+		return fmt.Errorf("Échec d'analyse de l'instantané : %w", err)
 	}
 	f := resolveLocalClientFiles()
 	targets := map[string]string{

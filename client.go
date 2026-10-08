@@ -20,9 +20,9 @@ import (
 	"github.com/google/uuid"
 )
 
-// ---- ZCode 桌面客户端身份伪装 ----
-// 移植 zcode-switch quota.rs 的 zai_headers_with_version：
-// 计费/活动/聊天接口共用同一套客户端标识头。
+// ---- Usurpation d'identité du client desktop ZCode ----
+// Portage de zai_headers_with_version de zcode-switch quota.rs :
+// Les interfaces de facturation, d'activités et de chat partagent les mêmes en-têtes d'identification.
 
 const (
 	zcodeOrigin       = "https://zcode.z.ai"
@@ -40,23 +40,23 @@ var (
 	cachedOSVer    string
 	cachedOSCat    string
 
-	// 上游 HTTP 客户端缓存（连接池复用）
+	// Cache des clients HTTP amont (réutilisation du pool de connexions)
 	clientCache sync.Map
 )
 
-// ClientPlatform 返回 "win32-x64" 形式的平台标识
+// ClientPlatform renvoie l'identifiant de plateforme sous forme "win32-x64"
 func ClientPlatform() string {
 	clientInfoOnce.Do(initClientInfo)
 	return cachedPlatform
 }
 
-// clientTimezoneValue 当前时区（IANA 名）
+// clientTimezoneValue fuseau horaire actuel (nom IANA)
 func clientTimezoneValue() string {
 	clientInfoOnce.Do(initClientInfo)
 	return cachedTZ
 }
 
-// osCategoryValue 操作系统类别（windows/darwin/linux）
+// osCategoryValue catégorie d'OS (windows/darwin/linux)
 func osCategoryValue() string {
 	clientInfoOnce.Do(initClientInfo)
 	return cachedOSCat
@@ -77,7 +77,7 @@ func initClientInfo() {
 	cachedOSVer = detectOSVersion()
 }
 
-// detectTimezone Windows 用 tzutil 映射，其他平台取 /etc/localtime
+// detectTimezone Windows mappe via tzutil, les autres plateformes lisent /etc/localtime
 func detectTimezone() string {
 	if runtime.GOOS == "windows" {
 		out, err := exec.Command("tzutil", "/g").Output()
@@ -103,7 +103,7 @@ func detectTimezone() string {
 	return "UTC"
 }
 
-// detectOSVersion Windows 读注册表 CurrentBuildNumber → "10.0.x"
+// detectOSVersion Windows lit le registre CurrentBuildNumber → "10.0.x"
 func detectOSVersion() string {
 	if runtime.GOOS != "windows" {
 		return ""
@@ -124,8 +124,8 @@ func detectOSVersion() string {
 	return "10.0.19044"
 }
 
-// DetectZCodeAppVersion 从注册表卸载信息探测已安装 ZCode 版本（zcode-switch 同款逻辑），
-// 找不到时回退内置版本号。
+// DetectZCodeAppVersion détecte la version installée de ZCode via le registre de désinstallation
+// Repli sur la version interne par défaut si introuvable.
 func DetectZCodeAppVersion() string {
 	if runtime.GOOS != "windows" {
 		return fallbackAppVer
@@ -150,7 +150,7 @@ func DetectZCodeAppVersion() string {
 				name, ver = "", ""
 				continue
 			}
-			// 行格式: "    DisplayName    REG_SZ    ZCode 3.11.2"
+			// Format de ligne : "    DisplayName    REG_SZ    ZCode 3.11.2"
 			fields := strings.Fields(l)
 			if len(fields) < 3 {
 				continue
@@ -189,14 +189,14 @@ func normalizeVersion(v string) string {
 	return v
 }
 
-// ClientIdentity 一次请求的客户端身份（版本 + 设备 + 请求 ID）
+// ClientIdentity identité client d'une requête (version + appareil + ID de requête)
 type ClientIdentity struct {
 	AppVersion string
 	DeviceMid  string
 	RequestID  string
 }
 
-// NewClientIdentity 构造身份；deviceMid 为空时尝试读本机 telemetry-state.json
+// NewClientIdentity construit l'identité ; lit telemetry-state.json si deviceMid est vide
 func NewClientIdentity(appVersion, deviceMid string) ClientIdentity {
 	if deviceMid == "" {
 		deviceMid = LocalDeviceMid()
@@ -204,7 +204,7 @@ func NewClientIdentity(appVersion, deviceMid string) ClientIdentity {
 	return ClientIdentity{AppVersion: appVersion, DeviceMid: deviceMid, RequestID: uuid.NewString()}
 }
 
-// LocalDeviceMid 读取本机 ZCode 客户端的 deviceMid
+// LocalDeviceMid lit le deviceMid du client ZCode local
 func LocalDeviceMid() string {
 	p := LocalTelemetryPath()
 	if p == "" {
@@ -223,8 +223,7 @@ func LocalDeviceMid() string {
 	return v.DeviceMid
 }
 
-// ZaiClientHeaders 生成 zcode.z.ai 计费/活动接口的完整客户端头
-// （quota.rs zai_headers_with_version 移植，Authorization 由调用方补充）
+// ZaiClientHeaders génère l'ensemble des en-têtes client pour les interfaces zcode.z.ai
 func ZaiClientHeaders(id ClientIdentity) map[string]string {
 	clientInfoOnce.Do(initClientInfo)
 	h := map[string]string{
@@ -249,9 +248,9 @@ func ZaiClientHeaders(id ClientIdentity) map[string]string {
 	return h
 }
 
-// ---- HTTP 客户端工厂（组代理 + 后续 utls 指纹）----
+// ---- Usine de clients HTTP (proxy de groupe + empreinte utls) ----
 
-// proxyURLForNode 将代理节点转成 URL 字符串
+// ProxyURLForNode convertit un nœud proxy en chaîne URL
 func ProxyURLForNode(n *ProxyNode) string {
 	if n == nil || n.Host == "" {
 		return ""
@@ -267,8 +266,7 @@ func ProxyURLForNode(n *ProxyNode) string {
 	return fmt.Sprintf("%s://%s%s:%d", scheme, auth, n.Host, n.Port)
 }
 
-// NewUpstreamHTTPClient 标准库 TLS 客户端（含 HTTP/2），用于 api.z.ai / open.bigmodel.cn
-// 等非 ESA WAF 保护的端点（实测 api.z.ai 协商 h2）。
+// NewUpstreamHTTPClient client TLS de la bibliothèque standard (avec HTTP/2)
 func NewUpstreamHTTPClient(proxyURL string, timeout time.Duration) *http.Client {
 	transport := &http.Transport{
 		TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS12},
@@ -280,15 +278,14 @@ func NewUpstreamHTTPClient(proxyURL string, timeout time.Duration) *http.Client 
 	return &http.Client{
 		Transport: transport,
 		Timeout:   timeout,
-		// 不跟随重定向：WAF 挑战/登录页 302 交由 relay 显式分类
+		// Ne pas suivre les redirections : défis WAF / redirections traités explicitement
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
 }
 
-// NewFingerprintHTTPClient utls 指纹客户端（HTTP/1.1），用于 zcode.z.ai 等
-// ESA WAF 保护端点：模拟浏览器 ClientHello，且 WAF 不支持 h2 ALPN。
+// NewFingerprintHTTPClient client avec empreinte utls (HTTP/1.1)
 func NewFingerprintHTTPClient(proxyURL string, timeout time.Duration) *http.Client {
 	fp := fingerprintHook()
 	dialer := &net.Dialer{Timeout: 30 * time.Second}
@@ -308,7 +305,7 @@ func NewFingerprintHTTPClient(proxyURL string, timeout time.Duration) *http.Clie
 	transport := &http.Transport{
 		DialContext:     dialer.DialContext,
 		DialTLSContext:  dialTLS,
-		TLSNextProto:    map[string]func(string, *tls.Conn) http.RoundTripper{}, // 禁 h2
+		TLSNextProto:    map[string]func(string, *tls.Conn) http.RoundTripper{}, // Désactive h2
 		MaxIdleConns:    32,
 		IdleConnTimeout: 90 * time.Second,
 	}
@@ -321,12 +318,11 @@ func NewFingerprintHTTPClient(proxyURL string, timeout time.Duration) *http.Clie
 	}
 }
 
-// ClientForURL 按主机选择客户端：zcode.z.ai（ESA WAF）→ utls 指纹；其余 → 标准库 h2。
-// 客户端按 (代理, 指纹模式, JA3, 超时) 缓存复用连接池；设置变更时 CloseIdleClients() 失效。
+// ClientForURL choisit le client selon l'hôte : zcode.z.ai -> empreinte utls ; autres -> stdlib h2
 func ClientForURL(proxyURL, urlStr string, timeout time.Duration) *http.Client {
 	fp := fingerprintHook()
 	isZcode := strings.Contains(urlStr, "zcode.z.ai")
-	// 缓存键必须含主机类型：zcode.z.ai 用指纹+h1，api.z.ai 用标准库+h2（ALPN 仅 h2），不可互复用
+	// La clé de cache inclut le type d'hôte
 	key := fmt.Sprintf("%s|%s|%s|%s|%v", proxyURL, fp.Mode, fp.JA3, timeout, isZcode)
 	if v, ok := clientCache.Load(key); ok {
 		return v.(*http.Client)
@@ -341,7 +337,7 @@ func ClientForURL(proxyURL, urlStr string, timeout time.Duration) *http.Client {
 	return actual.(*http.Client)
 }
 
-// CloseIdleClients 关闭并清空缓存的全部上游客户端（指纹/代理设置变更后调用）
+// CloseIdleClients ferme et vide tous les clients amont mis en cache
 func CloseIdleClients() {
 	clientCache.Range(func(k, v interface{}) bool {
 		v.(*http.Client).CloseIdleConnections()
@@ -350,7 +346,7 @@ func CloseIdleClients() {
 	})
 }
 
-// applyProxy 给标准 transport 配置代理
+// applyProxy configure le proxy sur le transport standard
 func applyProxy(transport *http.Transport, proxyURL string) {
 	if proxyURL == "" {
 		return
@@ -369,7 +365,7 @@ func applyProxy(transport *http.Transport, proxyURL string) {
 	}
 }
 
-// dialRaw 建立到目标 addr 的原始 TCP 连接（经代理隧道或直连）
+// dialRaw établit une connexion TCP brute vers l'adresse cible (via proxy ou directe)
 func dialRaw(ctx context.Context, dialer *net.Dialer, proxyURL, network, addr string) (net.Conn, error) {
 	if proxyURL == "" {
 		return dialer.DialContext(ctx, network, addr)
@@ -385,7 +381,7 @@ func dialRaw(ctx context.Context, dialer *net.Dialer, proxyURL, network, addr st
 			return nil, err
 		}
 		return sd.Dial(network, addr)
-	default: // http/https 代理：CONNECT 隧道
+	default: // Proxy http/https : tunnel CONNECT
 		conn, err := dialer.DialContext(ctx, "tcp", u.Host)
 		if err != nil {
 			return nil, err
@@ -398,7 +394,7 @@ func dialRaw(ctx context.Context, dialer *net.Dialer, proxyURL, network, addr st
 	}
 }
 
-// httpConnectTunnel 向 HTTP 代理发送 CONNECT 并等待 200
+// httpConnectTunnel envoie la commande CONNECT au proxy HTTP et attend le statut 200
 func httpConnectTunnel(ctx context.Context, conn net.Conn, addr string, proxyURL *url.URL) error {
 	req := &http.Request{
 		Method: http.MethodConnect,
@@ -421,10 +417,10 @@ func httpConnectTunnel(ctx context.Context, conn net.Conn, addr string, proxyURL
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("代理 CONNECT 失败: HTTP %d", resp.StatusCode)
+		return fmt.Errorf("Échec CONNECT proxy : HTTP %d", resp.StatusCode)
 	}
 	if br.Buffered() > 0 {
-		return fmt.Errorf("CONNECT 响应带多余数据")
+		return fmt.Errorf("Données superflues dans la réponse CONNECT")
 	}
 	return nil
 }

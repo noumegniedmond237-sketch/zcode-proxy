@@ -14,23 +14,23 @@ import (
 	"github.com/google/uuid"
 )
 
-// ---- 活动检测 / 领取 / 套餐激活 ----
-// 移植 zcode-switch claim.rs：
-//   检测: GET  zcode.z.ai/api/v1/zcode-plan/billing/preview?app_version&platform
-//   领取: POST zcode.z.ai/api/v1/zcode-plan/billing/claim {"plan_id"} + 阿里云验证码头
-//   激活: POST zcode.z.ai/api/v1/event/report（app_launch + app_daily_active 两条事件）
+// ---- Détection d'activités / réclamation / activation de forfait ----
+// Portage de zcode-switch claim.rs :
+//   détection : GET  zcode.z.ai/api/v1/zcode-plan/billing/preview?app_version&platform
+//   réclamation : POST zcode.z.ai/api/v1/zcode-plan/billing/claim {"plan_id"} + en-tête de captcha Aliyun
+//   activation : POST zcode.z.ai/api/v1/event/report (deux événements app_launch + app_daily_active)
 
-// GrantItem 活动赠送额度明细（官方字段含 capabilities / effective_at / 单项 priority）
+// GrantItem détail du quota offert par une activité (champs officiels : capabilities / effective_at / priorité par élément)
 type GrantItem struct {
 	Name         string   `json:"name"`
 	Units        float64  `json:"units"`
 	Period       string   `json:"period"` // one_time | daily | weekly | monthly
 	Priority     int      `json:"priority,omitempty"`
 	Capabilities []string `json:"capabilities,omitempty"`
-	EffectiveAt  int64    `json:"effective_at,omitempty"` // epoch 秒（官方 effective_at）
+	EffectiveAt  int64    `json:"effective_at,omitempty"` // secondes epoch (effective_at officiel)
 }
 
-// ActivityPlan 可领取活动
+// ActivityPlan activité réclamable
 type ActivityPlan struct {
 	PlanID      string      `json:"plan_id"`
 	Name        string      `json:"name"`
@@ -40,73 +40,73 @@ type ActivityPlan struct {
 	GrantItems  []GrantItem `json:"grant_items"`
 }
 
-// ClaimedPlan 领取成功后服务端返回的套餐详情（官方 data.plan）
+// ClaimedPlan détail du forfait renvoyé par le serveur après une réclamation réussie (data.plan officiel)
 type ClaimedPlan struct {
 	UserPlanID string `json:"user_plan_id"`
 	PlanID     string `json:"plan_id"`
 	Status     string `json:"status"`
-	StartsAt   int64  `json:"starts_at,omitempty"` // epoch 秒
-	EndsAt     int64  `json:"ends_at,omitempty"`   // epoch 秒
+	StartsAt   int64  `json:"starts_at,omitempty"` // secondes epoch
+	EndsAt     int64  `json:"ends_at,omitempty"`   // secondes epoch
 }
 
-// ClaimResult 领取结果
+// ClaimResult résultat de la réclamation
 type ClaimResult struct {
 	OK         bool         `json:"ok"`
 	Code       int          `json:"code"`
 	Message    string       `json:"message"`
 	PlanID     string       `json:"plan_id"`
 	PlanName   string       `json:"plan_name"`
-	NextAt     int64        `json:"next_at"`      // 1005 时下次可领时间 epoch 毫秒
-	ServerTime int64        `json:"server_time"`  // 官方 data.server_time（毫秒）
+	NextAt     int64        `json:"next_at"`      // prochaine réclamation possible en millisecondes epoch (cas 1005)
+	ServerTime int64        `json:"server_time"`  // data.server_time officiel (millisecondes)
 	Plan       *ClaimedPlan `json:"plan,omitempty"`
 }
 
-// claimFailMessages 业务错误码 → 中文文案（与 zcode-switch i18n 一致）
+// claimFailMessages code d'erreur métier → libellé affiché (aligné sur l'i18n de zcode-switch)
 var claimFailMessages = map[int]string{
-	1001: "套餐不存在",
-	1002: "活动已结束或套餐暂不可领取",
-	1003: "该套餐已经领取过",
-	1004: "不符合领取条件",
-	1005: "今日领取名额已用完",
-	3001: "领取参数错误，请刷新后重试",
-	3007: "验证码校验失败，请重试",
-	401:  "请先登录后再领取",
+	1001: "Forfait introuvable",
+	1002: "Activité terminée ou forfait temporairement non réclamable",
+	1003: "Ce forfait a déjà été réclamé",
+	1004: "Conditions de réclamation non remplies",
+	1005: "Quota de réclamations du jour épuisé",
+	3001: "Paramètres de réclamation invalides, actualisez puis réessayez",
+	3007: "Échec de validation du captcha, réessayez",
+	401:  "Connectez-vous avant de réclamer",
 }
 
 func claimFailureMessage(code int, body map[string]interface{}) string {
 	base, ok := claimFailMessages[code]
 	if !ok {
-		base = "领取失败"
+		base = "Échec de la réclamation"
 	}
 	serverMsg := ""
 	if body != nil {
 		serverMsg = firstNonEmpty(jsonStr(body, "msg"), jsonStr(body, "message"))
 	}
 	if serverMsg != "" {
-		return fmt.Sprintf("%s（%s）", base, serverMsg)
+		return fmt.Sprintf("%s (%s)", base, serverMsg)
 	}
 	return base
 }
 
-// PreviewPlans 检测当前可领取的活动列表（按 priority 降序）
+// PreviewPlans détecte la liste des activités actuellement récupérables (par ordre décroissant de priorité)
 func (z *ZCodeAPI) PreviewPlans(a *Account) ([]ActivityPlan, error) {
 	token := z.billingToken(a)
 	if token == "" {
-		return nil, fmt.Errorf("账号缺少 JWT 凭证，无法检测活动")
+		return nil, fmt.Errorf("Le compte n'a pas d'identifiant JWT, détection des activités impossible")
 	}
 	urlStr := fmt.Sprintf("%s?app_version=%s&platform=%s", BillingPreviewURL, z.appVersion, ClientPlatform())
 	resp, err := z.doGetJSON(a, urlStr, nil)
 	if err != nil {
-		return nil, fmt.Errorf("活动预览请求失败: %w", err)
+		return nil, fmt.Errorf("Échec de la requête d'aperçu des activités : %w", err)
 	}
 	if resp.StatusCode == 401 || resp.StatusCode == 403 {
-		return nil, fmt.Errorf("鉴权失败 HTTP %d（凭证可能已失效）", resp.StatusCode)
+		return nil, fmt.Errorf("Échec d'authentification HTTP %d (identifiants peut-être expirés)", resp.StatusCode)
 	}
 	if resp.Body == nil {
-		return nil, fmt.Errorf("活动预览响应解析失败: %s", truncate(resp.RawText, 200))
+		return nil, fmt.Errorf("Échec d'analyse de la réponse d'aperçu des activités : %s", truncate(resp.RawText, 200))
 	}
 	if code := jsonInt(resp.Body, "code"); code != 0 {
-		return nil, fmt.Errorf("活动预览失败: %s", claimFailureMessage(code, resp.Body))
+		return nil, fmt.Errorf("Échec de l'aperçu des activités : %s", claimFailureMessage(code, resp.Body))
 	}
 	data, _ := resp.Body["data"].(map[string]interface{})
 	if data == nil {
@@ -146,7 +146,7 @@ func parseActivityPlan(p map[string]interface{}) *ActivityPlan {
 	if ap.Priority < 0 {
 		ap.Priority = 0
 	}
-	// entitlements[] → 只保留 model_usage/token 的赠送项
+	// entitlements[] → ne conserve que les éléments offerts de type model_usage/token
 	if ents, ok := p["entitlements"].([]interface{}); ok {
 		for _, e := range ents {
 			em, ok := e.(map[string]interface{})
@@ -165,7 +165,7 @@ func parseActivityPlan(p map[string]interface{}) *ActivityPlan {
 			}
 			period := firstNonEmpty(jsonStr(em, "period"), "one_time")
 			gi := GrantItem{Name: showName, Units: units, Period: period, Priority: jsonInt(em, "priority")}
-			// 官方附加字段：capabilities[]、effective_at
+			// champs supplémentaires officiels : capabilities[], effective_at
 			if caps, ok := em["capabilities"].([]interface{}); ok {
 				for _, c := range caps {
 					if cs, ok := c.(string); ok && cs != "" {
@@ -177,7 +177,7 @@ func parseActivityPlan(p map[string]interface{}) *ActivityPlan {
 				gi.EffectiveAt = int64(*ea)
 			}
 			ap.GrantItems = append(ap.GrantItems, gi)
-			ap.Grants = append(ap.Grants, fmt.Sprintf("%s · %s Token（%s）", showName, formatUnits(units), periodLabelCN(period)))
+			ap.Grants = append(ap.Grants, fmt.Sprintf("%s · %s Token (%s)", showName, formatUnits(units), periodLabelCN(period)))
 		}
 	}
 	return ap
@@ -186,16 +186,16 @@ func parseActivityPlan(p map[string]interface{}) *ActivityPlan {
 func periodLabelCN(period string) string {
 	switch period {
 	case "daily":
-		return "每日"
+		return "Quotidien"
 	case "weekly":
-		return "每周"
+		return "Hebdomadaire"
 	case "monthly":
-		return "每月"
+		return "Mensuel"
 	}
-	return "一次性"
+	return "Unique"
 }
 
-// formatUnits 亿/万 缩写（claim.rs fmt_units 移植）
+// formatUnits abréviation des grandes valeurs (portage de fmt_units de claim.rs)
 func formatUnits(n float64) string {
 	trim := func(x float64) string {
 		r := math_Round(x*10) / 10
@@ -206,9 +206,9 @@ func formatUnits(n float64) string {
 	}
 	switch {
 	case n >= 1e8:
-		return trim(n/1e8) + "亿"
+		return trim(n/1e8) + " ×10⁸"
 	case n >= 1e4:
-		return trim(n/1e4) + "万"
+		return trim(n/1e4) + " ×10⁴"
 	}
 	return fmt.Sprintf("%d", int64(math_Round(n)))
 }
@@ -220,18 +220,18 @@ func math_Round(x float64) float64 {
 	return float64(int64(x + 0.5))
 }
 
-// SubmitClaim 提交领取（必须带验证码参数）
+// SubmitClaim soumet la réclamation (paramètre de captcha obligatoire)
 func (z *ZCodeAPI) SubmitClaim(a *Account, planID, captchaParam, captchaRegion string) *ClaimResult {
 	result := &ClaimResult{PlanID: planID}
 	if strings.TrimSpace(captchaParam) == "" {
 		result.Code = -1
-		result.Message = "缺少人机验证参数（验证码求解失败）"
+		result.Message = "Paramètre de vérification anti-robot manquant (échec de résolution du captcha)"
 		return result
 	}
 	token := z.billingToken(a)
 	if token == "" {
 		result.Code = -1
-		result.Message = "账号缺少 JWT 凭证"
+		result.Message = "Le compte n'a pas d'identifiant JWT"
 		return result
 	}
 
@@ -256,7 +256,7 @@ func (z *ZCodeAPI) SubmitClaim(a *Account, planID, captchaParam, captchaRegion s
 	resp, err := client.Do(req)
 	if err != nil {
 		result.Code = -1
-		result.Message = fmt.Sprintf("领取请求失败: %v", err)
+		result.Message = fmt.Sprintf("Échec de la requête de réclamation : %v", err)
 		return result
 	}
 	defer resp.Body.Close()
@@ -269,7 +269,7 @@ func (z *ZCodeAPI) SubmitClaim(a *Account, planID, captchaParam, captchaRegion s
 		code = resp.StatusCode
 	}
 	result.Code = code
-	// 官方 data.server_time（秒→毫秒）
+	// data.server_time officiel (secondes → millisecondes)
 	if data, ok := v["data"].(map[string]interface{}); ok {
 		if st := jsonNum(data, "server_time"); st != nil {
 			result.ServerTime = int64(*st) * 1000
@@ -277,8 +277,8 @@ func (z *ZCodeAPI) SubmitClaim(a *Account, planID, captchaParam, captchaRegion s
 	}
 	if code == 0 {
 		result.OK = true
-		result.Message = "领取成功"
-		// 官方 data.plan: {user_plan_id, plan_id, status, starts_at, ends_at}
+		result.Message = "Réclamation réussie"
+		// data.plan officiel : {user_plan_id, plan_id, status, starts_at, ends_at}
 		if data, ok := v["data"].(map[string]interface{}); ok {
 			if plan, ok := data["plan"].(map[string]interface{}); ok {
 				cp := &ClaimedPlan{
@@ -302,7 +302,7 @@ func (z *ZCodeAPI) SubmitClaim(a *Account, planID, captchaParam, captchaRegion s
 		return result
 	}
 	result.Message = claimFailureMessage(code, v)
-	// 1005: 今日名额用完，提取下次可领时间（官方 failureEndsAt = data.plan.ends_at 秒）
+	// 1005 : quota du jour épuisé, extraction de la prochaine réclamation possible (failureEndsAt officiel = data.plan.ends_at en secondes)
 	if code == 1005 {
 		if data, ok := v["data"].(map[string]interface{}); ok {
 			if plan, ok := data["plan"].(map[string]interface{}); ok {
@@ -315,11 +315,11 @@ func (z *ZCodeAPI) SubmitClaim(a *Account, planID, captchaParam, captchaRegion s
 	return result
 }
 
-// ReportActivation 上报激活事件（app_launch + app_daily_active），触发服务端 Start Plan 授予
+// ReportActivation envoie les événements d'activation (app_launch + app_daily_active) et déclenche l'attribution du Start Plan côté serveur
 func (z *ZCodeAPI) ReportActivation(a *Account) error {
 	userID := z.telemetryUserID(a)
 	if userID == "" {
-		return fmt.Errorf("无法确定 user_id（user_info 缺失）")
+		return fmt.Errorf("Impossible de déterminer le user_id (user_info absent)")
 	}
 	mid := a.DeviceMid
 	if mid == "" {
@@ -359,23 +359,23 @@ func (z *ZCodeAPI) ReportActivation(a *Account) error {
 		}
 		resp, err := client.Do(req)
 		if err != nil {
-			return fmt.Errorf("激活事件 %s 上报失败: %w", element, err)
+			return fmt.Errorf("Échec de l'envoi de l'événement d'activation %s : %w", element, err)
 		}
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		resp.Body.Close()
 		var v map[string]interface{}
 		json.Unmarshal(raw, &v)
 		if code := jsonInt(v, "code"); code != 0 && code != -1 {
-			return fmt.Errorf("激活事件 %s 被拒: %s", element, claimFailureMessage(code, v))
+			return fmt.Errorf("Événement d'activation %s refusé : %s", element, claimFailureMessage(code, v))
 		}
 		if resp.StatusCode >= 400 {
-			return fmt.Errorf("激活事件 %s HTTP %d: %s", element, resp.StatusCode, truncate(string(raw), 150))
+			return fmt.Errorf("Événement d'activation %s HTTP %d : %s", element, resp.StatusCode, truncate(string(raw), 150))
 		}
 	}
 	return nil
 }
 
-// telemetryUserID 从 user_info 提取 user_id（claim.rs telemetry_user_id 移植）
+// telemetryUserID extrait user_id depuis user_info (portage de telemetry_user_id de claim.rs)
 func (z *ZCodeAPI) telemetryUserID(a *Account) string {
 	if a.UserInfo != "" {
 		var ui map[string]interface{}
@@ -385,7 +385,7 @@ func (z *ZCodeAPI) telemetryUserID(a *Account) string {
 			}
 		}
 	}
-	// 兜底：解 access_token / zcode_jwt 的 JWT payload
+	// Repli : décodage du payload JWT de access_token / zcode_jwt
 	for _, tok := range []string{a.AccessToken, a.ZCodeJWT} {
 		if tok == "" {
 			continue
@@ -399,13 +399,13 @@ func (z *ZCodeAPI) telemetryUserID(a *Account) string {
 	return a.UserID
 }
 
-// ClaimForAccount 组合流程：检测活动 → 选优先级最高 → 求解验证码 → 领取 → 落记录。
-// 账号级互斥：官方客户端用跨窗口广播锁防重复领取（createBroadcastService），
-// 这里用 per-account mutex 达到同等效果（UI 手动与 cron 计划并发时不会双领）。
+// ClaimForAccount flux combiné : détection des activités → sélection de la priorité la plus haute → résolution du captcha → réclamation → enregistrement.
+// Exclusion mutuelle par compte : le client officiel utilise un verrou diffusé entre fenêtres pour éviter les réclamations en double (createBroadcastService) ;
+// ici un mutex par compte produit le même effet (pas de double réclamation entre l'UI manuelle et le planificateur cron).
 func (z *ZCodeAPI) ClaimForAccount(a *Account) *ClaimResult {
 	mu := z.claimLockFor(a.ID)
 	if !mu.TryLock() {
-		return &ClaimResult{Code: -1, Message: "该账号已有领取任务在执行中（本地互斥）"}
+		return &ClaimResult{Code: -1, Message: "Une tâche de réclamation est déjà en cours pour ce compte (exclusion mutuelle locale)"}
 	}
 	defer mu.Unlock()
 	return z.claimForAccountLocked(a)
@@ -432,20 +432,20 @@ func (z *ZCodeAPI) claimForAccountLocked(a *Account) *ClaimResult {
 		return &ClaimResult{Code: -1, Message: err.Error()}
 	}
 	if len(plans) == 0 {
-		// 无活动视为成功空跑（与 detect 语义一致，避免调度统计 0/N 误报 failed）
+		// Aucune activité est traité comme une exécution réussie à vide (cohérent avec detect, évite un faux failed dans les statistiques 0/N)
 		record.Success = true
-		record.Message = "当前无可领取活动"
+		record.Message = "Aucune activité à réclamer pour le moment"
 		z.db.InsertClaimRecord(record)
-		return &ClaimResult{OK: true, Code: 0, Message: "当前无可领取活动"}
+		return &ClaimResult{OK: true, Code: 0, Message: "Aucune activité à réclamer pour le moment"}
 	}
-	plan := plans[0] // 已按 priority 降序
+	plan := plans[0] // Déjà trié par priorité décroissante
 	record.PlanID = plan.PlanID
 	record.PlanName = plan.Name
 
-	// 求解阿里云验证码
+	// Résolution du captcha Aliyun
 	captchaParam, region, err := z.captcha.GetVerifyParam(a)
 	if err != nil {
-		record.Message = fmt.Sprintf("验证码求解失败: %v", err)
+		record.Message = fmt.Sprintf("Échec de résolution du captcha : %v", err)
 		z.db.InsertClaimRecord(record)
 		z.db.SetAccountClaimResult(a.ID, plan.Name, record.Message)
 		return &ClaimResult{Code: -1, PlanID: plan.PlanID, PlanName: plan.Name, Message: record.Message}
@@ -460,7 +460,7 @@ func (z *ZCodeAPI) claimForAccountLocked(a *Account) *ClaimResult {
 	z.db.InsertClaimRecord(record)
 	z.db.SetAccountClaimResult(a.ID, result.PlanName, result.Message)
 
-	// 领取成功后异步刷新额度
+	// Rafraîchissement asynchrone du quota après une réclamation réussie
 	if result.OK {
 		go func() {
 			time.Sleep(2 * time.Second)
@@ -470,7 +470,7 @@ func (z *ZCodeAPI) claimForAccountLocked(a *Account) *ClaimResult {
 	return result
 }
 
-// DetectForAccount 仅检测活动（不领取）
+// DetectForAccount détecte uniquement les activités (sans réclamer)
 func (z *ZCodeAPI) DetectForAccount(a *Account) *ClaimResult {
 	plans, err := z.PreviewPlans(a)
 	record := &ClaimRecord{AccountID: a.ID, Email: a.Email, TaskType: "detect"}
@@ -481,9 +481,9 @@ func (z *ZCodeAPI) DetectForAccount(a *Account) *ClaimResult {
 	}
 	if len(plans) == 0 {
 		record.Success = true
-		record.Message = "无可领取活动"
+		record.Message = "Aucune activité à réclamer"
 		z.db.InsertClaimRecord(record)
-		return &ClaimResult{OK: true, Message: "无可领取活动"}
+		return &ClaimResult{OK: true, Message: "Aucune activité à réclamer"}
 	}
 	names := make([]string, 0, len(plans))
 	for _, p := range plans {
@@ -491,13 +491,13 @@ func (z *ZCodeAPI) DetectForAccount(a *Account) *ClaimResult {
 	}
 	record.Success = true
 	record.PlanID = plans[0].PlanID
-	record.PlanName = strings.Join(names, "、")
-	record.Message = fmt.Sprintf("发现 %d 个活动: %s", len(plans), record.PlanName)
+	record.PlanName = strings.Join(names, ", ")
+	record.Message = fmt.Sprintf("%d activités détectées : %s", len(plans), record.PlanName)
 	z.db.InsertClaimRecord(record)
 	return &ClaimResult{OK: true, PlanID: plans[0].PlanID, PlanName: record.PlanName, Message: record.Message}
 }
 
-// ActivateForAccount 激活流程：上报激活事件 → 刷新额度确认套餐生效
+// ActivateForAccount flux d'activation : envoi des événements d'activation → rafraîchissement du quota pour confirmer l'activation du forfait
 func (z *ZCodeAPI) ActivateForAccount(a *Account) *ClaimResult {
 	record := &ClaimRecord{AccountID: a.ID, Email: a.Email, TaskType: "activate"}
 	if err := z.ReportActivation(a); err != nil {
@@ -505,12 +505,12 @@ func (z *ZCodeAPI) ActivateForAccount(a *Account) *ClaimResult {
 		z.db.InsertClaimRecord(record)
 		return &ClaimResult{Code: -1, Message: err.Error()}
 	}
-	// 上报后刷新额度确认
+	// Rafraîchissement du quota après l'envoi, pour confirmation
 	time.Sleep(1500 * time.Millisecond)
 	ov, err := z.FetchQuotaRaw(a)
 	if err != nil {
 		record.Success = true
-		record.Message = "激活事件已上报；额度确认失败: " + err.Error()
+		record.Message = "Événements d'activation envoyés ; échec de confirmation du quota : " + err.Error()
 		z.db.InsertClaimRecord(record)
 		return &ClaimResult{OK: true, Message: record.Message}
 	}
@@ -518,15 +518,15 @@ func (z *ZCodeAPI) ActivateForAccount(a *Account) *ClaimResult {
 	if ov.PlanTier != "" {
 		record.Success = true
 		record.PlanName = ov.PlanTier
-		record.Message = fmt.Sprintf("激活成功，当前套餐: %s", ov.PlanTier)
+		record.Message = fmt.Sprintf("Activation réussie, forfait actuel : %s", ov.PlanTier)
 	} else {
-		record.Message = "激活事件已上报，但未检测到生效套餐（服务端可能延迟授予）"
+		record.Message = "Événements d'activation envoyés, mais aucun forfait actif détecté (attribution serveur peut-être différée)"
 	}
 	z.db.InsertClaimRecord(record)
 	return &ClaimResult{OK: record.Success, PlanName: ov.PlanTier, Message: record.Message}
 }
 
-// truncate 按 rune 截断，避免切碎 UTF-8 多字节字符
+// truncate tronque par rune pour ne pas couper les caractères UTF-8 multi-octets
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s

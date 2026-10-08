@@ -14,17 +14,17 @@ import (
 	"strings"
 )
 
-// ---- ZCode 本地凭证 enc:v1 加解密 ----
-// 格式: "enc:v1:" + b64url(nonce12) + "." + b64url(tag16) + "." + b64url(ciphertext)
-// 密钥: SHA-256(secret)，secret = 环境变量 ZCODE_CREDENTIAL_SECRET
-//       或回退 "zcode-credential-fallback:{node平台}:{home}:{用户名}"
-// 与 zcode-switch/src-tauri/src/zcrypto.rs 逐字节兼容。
+// ---- Chiffrement / déchiffrement des identifiants locaux ZCode enc:v1 ----
+// Format : "enc:v1:" + b64url(nonce12) + "." + b64url(tag16) + "." + b64url(ciphertext)
+// Clé : SHA-256(secret), secret = variable d'environnement ZCODE_CREDENTIAL_SECRET
+//       ou repli "zcode-credential-fallback:{plateforme node}:{home}:{nom d'utilisateur}"
+// Compatible octet par octet avec zcode-switch/src-tauri/src/zcrypto.rs.
 
 const encPrefix = "enc:v1:"
 
 var b64URLNoPad = base64.RawURLEncoding
 
-// NodePlatform 返回 Node.js 语义的平台名（与 ZCode 客户端一致）
+// NodePlatform retourne le nom de plateforme au sens Node.js (identique au client ZCode)
 func NodePlatform() string {
 	switch runtime.GOOS {
 	case "windows":
@@ -36,8 +36,8 @@ func NodePlatform() string {
 	}
 }
 
-// DefaultCredentialSecret 计算默认凭证密钥。
-// home 为空时自动取 USERPROFILE / HOME。
+// DefaultCredentialSecret calcule la clé d'identifiants par défaut.
+// Si home est vide, USERPROFILE / HOME est détecté automatiquement.
 func DefaultCredentialSecret(home string) string {
 	if s := os.Getenv("ZCODE_CREDENTIAL_SECRET"); s != "" {
 		return s
@@ -63,12 +63,12 @@ func deriveKey(secret string) []byte {
 	return h[:]
 }
 
-// IsEncryptedValue 判断值是否为 enc:v1 密文
+// IsEncryptedValue indique si une valeur est un chiffré enc:v1
 func IsEncryptedValue(v string) bool {
 	return strings.HasPrefix(v, encPrefix)
 }
 
-// DecryptCredential 解密 enc:v1 值；明文原样返回
+// DecryptCredential déchiffre une valeur enc:v1 ; le clair est retourné tel quel
 func DecryptCredential(value, secret string) (string, error) {
 	if !IsEncryptedValue(value) {
 		return value, nil
@@ -76,22 +76,22 @@ func DecryptCredential(value, secret string) (string, error) {
 	body := strings.TrimPrefix(value, encPrefix)
 	parts := strings.Split(body, ".")
 	if len(parts) != 3 {
-		return "", fmt.Errorf("enc:v1 格式不正确")
+		return "", fmt.Errorf("Format enc:v1 invalide")
 	}
 	nonce, err := b64URLNoPad.DecodeString(parts[0])
 	if err != nil {
-		return "", fmt.Errorf("nonce 解码失败: %w", err)
+		return "", fmt.Errorf("Échec du décodage du nonce: %w", err)
 	}
 	tag, err := b64URLNoPad.DecodeString(parts[1])
 	if err != nil {
-		return "", fmt.Errorf("tag 解码失败: %w", err)
+		return "", fmt.Errorf("Échec du décodage du tag: %w", err)
 	}
 	ct, err := b64URLNoPad.DecodeString(parts[2])
 	if err != nil {
-		return "", fmt.Errorf("密文解码失败: %w", err)
+		return "", fmt.Errorf("Échec du décodage du chiffré: %w", err)
 	}
 	if len(nonce) != 12 {
-		return "", fmt.Errorf("nonce 长度异常: %d", len(nonce))
+		return "", fmt.Errorf("Longueur de nonce anormale: %d", len(nonce))
 	}
 	block, err := aes.NewCipher(deriveKey(secret))
 	if err != nil {
@@ -101,16 +101,16 @@ func DecryptCredential(value, secret string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Rust aes-gcm 输出 ct||tag，Go GCM Open 同样期望 ct||tag
+	// Rust aes-gcm produit ct||tag, Go GCM Open attend de même ct||tag
 	buf := append(append([]byte{}, ct...), tag...)
 	pt, err := gcm.Open(nil, nonce, buf, nil)
 	if err != nil {
-		return "", fmt.Errorf("解密失败（密钥不匹配或数据损坏）")
+		return "", fmt.Errorf("Échec du déchiffrement (clé incorrecte ou données endommagées)")
 	}
 	return string(pt), nil
 }
 
-// EncryptCredential 加密为 enc:v1 格式（一键切回本地客户端时写回用）
+// EncryptCredential chiffre au format enc:v1 (réécriture vers le client local lors du rebascule en un clic)
 func EncryptCredential(plain, secret string) (string, error) {
 	block, err := aes.NewCipher(deriveKey(secret))
 	if err != nil {
@@ -132,11 +132,11 @@ func EncryptCredential(plain, secret string) (string, error) {
 		b64URLNoPad.EncodeToString(ct)), nil
 }
 
-// DecodeJWTPayload 解出 JWT payload 的 JSON（不验签，仅读取声明）
+// DecodeJWTPayload extrait le payload JSON d'un JWT (sans vérifier la signature, lecture seule des claims)
 func DecodeJWTPayload(jwt string) (map[string]interface{}, error) {
 	parts := strings.Split(jwt, ".")
 	if len(parts) != 3 {
-		return nil, fmt.Errorf("不是 JWT 格式")
+		return nil, fmt.Errorf("Format JWT invalide")
 	}
 	payload, err := b64URLNoPad.DecodeString(strings.TrimRight(parts[1], "="))
 	if err != nil {
@@ -149,7 +149,7 @@ func DecodeJWTPayload(jwt string) (map[string]interface{}, error) {
 	return out, nil
 }
 
-// ZCodeHome 返回本机 ZCode 数据目录（~/.zcode）
+// ZCodeHome retourne le répertoire de données ZCode local (~/.zcode)
 func ZCodeHome() string {
 	if h := os.Getenv("ZCODE_SWITCH_HOME"); h != "" {
 		return h
@@ -161,7 +161,7 @@ func ZCodeHome() string {
 	return filepath.Join(home, ".zcode")
 }
 
-// LocalCredentialsPath 本地客户端凭证文件路径
+// LocalCredentialsPath chemin du fichier d'identifiants du client local
 func LocalCredentialsPath() string {
 	h := ZCodeHome()
 	if h == "" {
@@ -170,7 +170,7 @@ func LocalCredentialsPath() string {
 	return filepath.Join(h, "v2", "credentials.json")
 }
 
-// LocalTelemetryPath 本地 telemetry-state.json（deviceMid 来源）
+// LocalTelemetryPath telemetry-state.json local (source de deviceMid)
 func LocalTelemetryPath() string {
 	h := ZCodeHome()
 	if h == "" {

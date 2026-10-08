@@ -13,16 +13,16 @@ import (
 	"golang.org/x/crypto/pbkdf2"
 )
 
-// ---- 加密账号包导出 / 导入 ----
-// 格式: "zcb1:" + base64( salt(16) || nonce(12) || ciphertext )
-// 密钥: PBKDF2-SHA256(password, salt, 120000, 32) → AES-256-GCM
-// 用于跨机器迁移账号（含 JWT / API Key / 设备指纹 / 凭证快照）。
+// ---- Export / import du paquet de comptes chiffré ----
+// Format : "zcb1:" + base64( salt(16) || nonce(12) || ciphertext )
+// Clé : PBKDF2-SHA256(password, salt, 120000, 32) → AES-256-GCM
+// Pour migrer les comptes entre machines (inclut JWT / API Key / empreinte appareil / instantané d'identifiants).
 
 const bundlePrefix = "zcb1:"
 
 const pbkdf2Iterations = 120000
 
-// bundleAccount 包内账号结构（不含内部 ID，导入时按 user_id upsert）
+// bundleAccount structure d'un compte dans le paquet (sans ID interne, upsert sur user_id à l'import)
 type bundleAccount struct {
 	UserID       string `json:"user_id"`
 	Email        string `json:"email"`
@@ -40,10 +40,10 @@ type bundleAccount struct {
 	Remark       string `json:"remark,omitempty"`
 }
 
-// ExportBundle 导出全部（或指定）账号为加密包字符串
+// ExportBundle exporte tout (ou une sélection) des comptes sous forme de paquet chiffré
 func (m *AccountManager) ExportBundle(password string, ids []int64) (string, error) {
 	if password == "" {
-		return "", fmt.Errorf("请设置导出密码")
+		return "", fmt.Errorf("Veuillez définir un mot de passe d'export")
 	}
 	all, err := m.db.ListAccounts("")
 	if err != nil {
@@ -68,7 +68,7 @@ func (m *AccountManager) ExportBundle(password string, ids []int64) (string, err
 		})
 	}
 	if len(items) == 0 {
-		return "", fmt.Errorf("没有可导出的账号")
+		return "", fmt.Errorf("Aucun compte à exporter")
 	}
 	plain, err := json.Marshal(map[string]interface{}{"version": 1, "accounts": items})
 	if err != nil {
@@ -98,18 +98,18 @@ func (m *AccountManager) ExportBundle(password string, ids []int64) (string, err
 	return bundlePrefix + base64.StdEncoding.EncodeToString(raw), nil
 }
 
-// ImportBundle 解密并导入账号包，返回导入账号数
+// ImportBundle déchiffre et importe un paquet de comptes, retourne le nombre importé
 func (m *AccountManager) ImportBundle(password, bundle string) (int, error) {
 	bundle = strings.TrimSpace(bundle)
 	if !strings.HasPrefix(bundle, bundlePrefix) {
-		return 0, fmt.Errorf("不是有效的账号包（缺少 zcb1: 前缀）")
+		return 0, fmt.Errorf("Paquet de comptes invalide (préfixe zcb1: manquant)")
 	}
 	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(bundle, bundlePrefix))
 	if err != nil {
-		return 0, fmt.Errorf("账号包 base64 解码失败")
+		return 0, fmt.Errorf("Échec du décodage base64 du paquet")
 	}
 	if len(raw) < 16+12+16 {
-		return 0, fmt.Errorf("账号包数据过短")
+		return 0, fmt.Errorf("Données du paquet trop courtes")
 	}
 	salt, nonce, ct := raw[:16], raw[16:28], raw[28:]
 	key := pbkdf2.Key([]byte(password), salt, pbkdf2Iterations, 32, sha256.New)
@@ -123,13 +123,13 @@ func (m *AccountManager) ImportBundle(password, bundle string) (int, error) {
 	}
 	plain, err := gcm.Open(nil, nonce, ct, nil)
 	if err != nil {
-		return 0, fmt.Errorf("解密失败：密码错误或包已损坏")
+		return 0, fmt.Errorf("Échec du déchiffrement : mot de passe incorrect ou paquet endommagé")
 	}
 	var payload struct {
 		Accounts []bundleAccount `json:"accounts"`
 	}
 	if err := json.Unmarshal(plain, &payload); err != nil {
-		return 0, fmt.Errorf("包内容解析失败")
+		return 0, fmt.Errorf("Échec de l'analyse du contenu du paquet")
 	}
 	count := 0
 	for _, it := range payload.Accounts {

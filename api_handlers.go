@@ -10,9 +10,9 @@ import (
 	"time"
 )
 
-// ---- 管理 REST API ----
+// ---- API REST d'administration ----
 
-// APIServer 管理接口服务
+// APIServer service d'interface d'administration
 type APIServer struct {
 	db        *DB
 	cfg       *FileConfig
@@ -25,7 +25,7 @@ type APIServer struct {
 	captcha   *CaptchaService
 }
 
-// NewAPIServer 创建 API 服务
+// NewAPIServer crée le service API
 func NewAPIServer(db *DB, cfg *FileConfig, pool *AccountPool, zapi *ZCodeAPI,
 	oauth *OAuthManager, acctMgr *AccountManager, scheduler *CronScheduler,
 	auth *AuthManager, captcha *CaptchaService) *APIServer {
@@ -33,9 +33,9 @@ func NewAPIServer(db *DB, cfg *FileConfig, pool *AccountPool, zapi *ZCodeAPI,
 		acctMgr: acctMgr, scheduler: scheduler, auth: auth, captcha: captcha}
 }
 
-// RegisterRoutes 注册路由（Go 1.22+ 方法模式）
+// RegisterRoutes enregistre les routes (mode méthode Go 1.22+)
 func (s *APIServer) RegisterRoutes(mux *http.ServeMux) {
-	// 认证
+	// Authentification
 	mux.HandleFunc("POST /api/login", s.auth.HandleLogin)
 	mux.HandleFunc("POST /api/logout", s.auth.HandleLogout)
 	mux.HandleFunc("GET /api/auth/check", s.auth.HandleCheckAuth)
@@ -43,10 +43,10 @@ func (s *APIServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/settings/api-key", s.auth.HandleGetAPIKey)
 	mux.HandleFunc("POST /api/settings/api-key/generate", s.auth.HandleGenerateAPIKey)
 
-	// 仪表盘
+	// Tableau de bord
 	mux.HandleFunc("GET /api/dashboard", s.handleDashboard)
 
-	// 账号
+	// Comptes
 	mux.HandleFunc("GET /api/accounts", s.handleListAccounts)
 	mux.HandleFunc("POST /api/accounts/import/local", s.handleImportLocal)
 	mux.HandleFunc("POST /api/accounts/import/paste", s.handleImportPaste)
@@ -67,7 +67,7 @@ func (s *APIServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/accounts/{id}", s.handleDeleteAccount)
 	mux.HandleFunc("GET /api/groups", s.handleListGroups)
 
-	// 活动计划
+	// Plans d'activité
 	mux.HandleFunc("GET /api/plans", s.handleListPlans)
 	mux.HandleFunc("POST /api/plans", s.handleSavePlan)
 	mux.HandleFunc("PUT /api/plans/{id}", s.handleSavePlan)
@@ -76,16 +76,16 @@ func (s *APIServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/plans/running", s.handleRunningPlans)
 	mux.HandleFunc("GET /api/plan-runs", s.handlePlanRuns)
 
-	// 记录
+	// Enregistrements
 	mux.HandleFunc("GET /api/claim-records", s.handleClaimRecords)
 	mux.HandleFunc("GET /api/usage-records", s.handleUsageRecords)
 	mux.HandleFunc("GET /api/stats", s.handleStats)
 
-	// 设置
+	// Paramètres
 	mux.HandleFunc("GET /api/settings", s.handleGetSettings)
 	mux.HandleFunc("PUT /api/settings", s.handlePutSettings)
 
-	// 代理
+	// Proxys
 	mux.HandleFunc("GET /api/proxies", s.handleListProxies)
 	mux.HandleFunc("POST /api/proxies", s.handleSaveProxy)
 	mux.HandleFunc("PUT /api/proxies/{id}", s.handleSaveProxy)
@@ -95,15 +95,15 @@ func (s *APIServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/proxies/system", s.handleSystemProxy)
 	mux.HandleFunc("GET /api/proxies/probe-ports", s.handleProbePorts)
 
-	// 验证码
+	// Captcha
 	mux.HandleFunc("GET /api/captcha/status", s.handleCaptchaStatus)
 	mux.HandleFunc("POST /api/captcha/invalidate", s.handleCaptchaInvalidate)
 	mux.HandleFunc("POST /api/captcha/solve", s.handleCaptchaSolve)
 
-	// 指纹
+	// Empreintes
 	mux.HandleFunc("GET /api/fingerprints", s.handleFingerprints)
 
-	// 模型
+	// Modèles
 	mux.HandleFunc("GET /api/models", s.handleModelList)
 	mux.HandleFunc("POST /api/models/sync", s.handleModelSync)
 	mux.HandleFunc("GET /api/models/catalog", s.handleModelCatalog)
@@ -113,7 +113,7 @@ func pathID(r *http.Request) (int64, error) {
 	return strconv.ParseInt(r.PathValue("id"), 10, 64)
 }
 
-// ---- 仪表盘 ----
+// ---- Tableau de bord ----
 
 func (s *APIServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	accounts, _ := s.db.ListAccounts("")
@@ -125,7 +125,7 @@ func (s *APIServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		statusCount[st]++
 		g := a.AccountGroup
 		if g == "" {
-			g = "未分组"
+			g = "Sans groupe"
 		}
 		groupCount[g]++
 		totalRemaining += a.Remaining
@@ -143,15 +143,15 @@ func (s *APIServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ---- 账号 ----
+// ---- Comptes ----
 
-// accountPublicView 脱敏账号视图
+// accountPublicView vue de compte masquée
 func accountPublicView(a *Account) map[string]interface{} {
 	mask := func(tok string) string {
 		if tok == "" {
 			return ""
 		}
-		// 任何长度都脱敏，短 token 也不全量返回
+		// Masquage quelle que soit la longueur : même un token court n'est jamais renvoyé en entier
 		if len(tok) <= 8 {
 			return "****"
 		}
@@ -233,7 +233,7 @@ func (s *APIServer) handleImportPaste(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "account": accountPublicView(a)})
 }
 
-// handleExportBundle 导出加密账号包
+// handleExportBundle exporte un paquet de comptes chiffré
 func (s *APIServer) handleExportBundle(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Password string  `json:"password"`
@@ -251,7 +251,7 @@ func (s *APIServer) handleExportBundle(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"bundle": bundle})
 }
 
-// handleImportBundle 导入加密账号包
+// handleImportBundle importe un paquet de comptes chiffré
 func (s *APIServer) handleImportBundle(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Password string `json:"password"`
@@ -286,7 +286,7 @@ func (s *APIServer) handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 func (s *APIServer) handleOAuthManual(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		State string `json:"state"`
-		Input string `json:"input"` // 回跳 URL 或 code
+		Input string `json:"input"` // URL de rappel ou code
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid request body")
@@ -296,14 +296,14 @@ func (s *APIServer) handleOAuthManual(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "message": "已提交，正在后台兑换"})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "message": "Soumis, échange en arrière-plan"})
 }
 
 func (s *APIServer) handleOAuthStatus(w http.ResponseWriter, r *http.Request) {
 	state := r.URL.Query().Get("state")
 	flow := s.oauth.FlowStatus(state)
 	if flow == nil {
-		writeAPIError(w, http.StatusNotFound, "流程不存在或已过期")
+		writeAPIError(w, http.StatusNotFound, "Flux inexistant ou expiré")
 		return
 	}
 	writeJSON(w, http.StatusOK, flow)
@@ -377,7 +377,7 @@ func (s *APIServer) handleAccountActivate(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, result)
 }
 
-// handleAccountReset 执行 Coding Plan 配额重置（审计发现接口）
+// handleAccountReset effectue la réinitialisation du quota Coding Plan (interface détectée par audit)
 func (s *APIServer) handleAccountReset(w http.ResponseWriter, r *http.Request) {
 	id, err := pathID(r)
 	if err != nil {
@@ -393,7 +393,7 @@ func (s *APIServer) handleAccountReset(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-// handleResetStatus 查询重置机会（five_hour / week）
+// handleResetStatus interroge les opportunités de réinitialisation (five_hour / week)
 func (s *APIServer) handleResetStatus(w http.ResponseWriter, r *http.Request) {
 	id, err := pathID(r)
 	if err != nil {
@@ -413,7 +413,7 @@ func (s *APIServer) handleResetStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "status": st})
 }
 
-// handleModelSync 同步官方模型目录
+// handleModelSync synchronise le catalogue officiel des modèles
 func (s *APIServer) handleModelSync(w http.ResponseWriter, r *http.Request) {
 	models, err := s.zapi.SyncModelCatalog()
 	if err != nil {
@@ -423,7 +423,7 @@ func (s *APIServer) handleModelSync(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "models": models, "total": len(models)})
 }
 
-// handleModelCatalog 读取缓存的模型目录
+// handleModelCatalog lit le catalogue de modèles en cache
 func (s *APIServer) handleModelCatalog(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"models": s.zapi.GetModelCatalog()})
 }
@@ -494,7 +494,7 @@ func (s *APIServer) handleSwitchBack(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"success": true,
-		"message": "已写回本地 ZCode 客户端，重启客户端生效",
+		"message": "Réécrit dans le client ZCode local, effectif après redémarrage du client",
 	})
 }
 
@@ -508,7 +508,7 @@ func (s *APIServer) handleRestoreLocal(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "message": "已从快照还原本地客户端"})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "message": "Client local restauré depuis le snapshot"})
 }
 
 func (s *APIServer) handleListGroups(w http.ResponseWriter, r *http.Request) {
@@ -523,7 +523,7 @@ func (s *APIServer) handleListGroups(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"groups": groups})
 }
 
-// ---- 活动计划 ----
+// ---- Plans d'activité ----
 
 func (s *APIServer) handleListPlans(w http.ResponseWriter, r *http.Request) {
 	plans, err := s.db.ListClaimPlans()
@@ -565,7 +565,7 @@ func (s *APIServer) handleSavePlan(w http.ResponseWriter, r *http.Request) {
 		p.ID = id
 	}
 	if err := ValidateCronExpr(p.CronExpr); err != nil {
-		writeAPIError(w, http.StatusBadRequest, "cron 表达式无效: "+err.Error())
+		writeAPIError(w, http.StatusBadRequest, "Expression cron invalide : "+err.Error())
 		return
 	}
 	if p.TaskType == "" {
@@ -605,7 +605,7 @@ func (s *APIServer) handleRunPlan(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "message": "计划已开始执行"})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "message": "Exécution du plan démarrée"})
 }
 
 func (s *APIServer) handleRunningPlans(w http.ResponseWriter, r *http.Request) {
@@ -622,7 +622,7 @@ func (s *APIServer) handlePlanRuns(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"records": records})
 }
 
-// ---- 记录与统计 ----
+// ---- Enregistrements et statistiques ----
 
 func (s *APIServer) handleClaimRecords(w http.ResponseWriter, r *http.Request) {
 	limit := queryInt(r, "limit", 100)
@@ -655,9 +655,9 @@ func (s *APIServer) handleStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, stats)
 }
 
-// ---- 设置 ----
+// ---- Paramètres ----
 
-// settingsWhitelist 允许前端修改的设置键
+// settingsWhitelist clés de paramètres modifiables par le frontend
 var settingsWhitelist = map[string]bool{
 	"selection_strategy": true, "quota_refresh_interval": true,
 	"upstream_proxy": true, "fingerprint": true, "custom_ja3": true,
@@ -670,7 +670,7 @@ func (s *APIServer) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	// 敏感项脱敏
+	// Masquage des éléments sensibles
 	delete(all, "password_hash")
 	if k, ok := all["api_key"]; ok && k != "" {
 		all["has_api_key"] = "1"
@@ -696,24 +696,24 @@ func (s *APIServer) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 			switch v {
 			case StrategyRandom, StrategyRoundRobin, StrategyBestQuota:
 			default:
-				writeAPIError(w, http.StatusBadRequest, "无效策略: "+v)
+				writeAPIError(w, http.StatusBadRequest, "Stratégie invalide : "+v)
 				return
 			}
 		}
 		if k == "quota_refresh_interval" {
 			if n, err := strconv.Atoi(v); err != nil || n < 0 || n > 86400 {
-				writeAPIError(w, http.StatusBadRequest, "无效刷新间隔")
+				writeAPIError(w, http.StatusBadRequest, "Intervalle de rafraîchissement invalide")
 				return
 			}
 		}
-		// 指纹设置服务端校验：非法值会导致所有上游连接失败
+		// Validation côté serveur du paramètre d'empreinte : une valeur invalide ferait échouer toutes les connexions amont
 		if k == "fingerprint" && !isValidFingerprint(v) {
-			writeAPIError(w, http.StatusBadRequest, "无效指纹预设: "+v)
+			writeAPIError(w, http.StatusBadRequest, "Préréglage d'empreinte invalide : "+v)
 			return
 		}
 		if k == "custom_ja3" && strings.TrimSpace(v) != "" {
 			if _, err := ja3ToClientHelloSpec(v); err != nil {
-				writeAPIError(w, http.StatusBadRequest, "无效 JA3: "+err.Error())
+				writeAPIError(w, http.StatusBadRequest, "JA3 invalide : "+err.Error())
 				return
 			}
 		}
@@ -723,7 +723,7 @@ func (s *APIServer) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		updated = append(updated, k)
 	}
-	// 指纹/代理变更：失效并关闭缓存的上游客户端连接池
+	// Changement d'empreinte/proxy : invalide et ferme le pool de connexions client amont en cache
 	for _, k := range updated {
 		if k == "fingerprint" || k == "custom_ja3" || k == "upstream_proxy" {
 			CloseIdleClients()
@@ -733,7 +733,7 @@ func (s *APIServer) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "updated": updated})
 }
 
-// ---- 代理 ----
+// ---- Proxys ----
 
 func (s *APIServer) handleListProxies(w http.ResponseWriter, r *http.Request) {
 	nodes, err := s.db.ListProxyNodes()
@@ -771,10 +771,10 @@ func (s *APIServer) handleSaveProxy(w http.ResponseWriter, r *http.Request) {
 		n.ID = id
 	}
 	if n.Host == "" || n.Port <= 0 {
-		writeAPIError(w, http.StatusBadRequest, "host/port 必填")
+		writeAPIError(w, http.StatusBadRequest, "host/port requis")
 		return
 	}
-	// 编辑时密码留空 = 保持原密码
+	// Mot de passe vide lors de l'édition = conserver le mot de passe existant
 	if n.ID > 0 && n.Password == "" {
 		if old, err := s.db.ListProxyNodes(); err == nil {
 			for _, o := range old {
@@ -821,7 +821,7 @@ func (s *APIServer) handleTestProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if target == nil {
-		writeAPIError(w, http.StatusNotFound, "代理节点不存在")
+		writeAPIError(w, http.StatusNotFound, "Nœud proxy introuvable")
 		return
 	}
 	proxyURL := ProxyURLForNode(target)
@@ -862,7 +862,7 @@ func (s *APIServer) handleProbePorts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"ports": ports})
 }
 
-// ---- 验证码 ----
+// ---- Captcha ----
 
 func (s *APIServer) handleCaptchaStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.captcha.Status())
@@ -873,7 +873,7 @@ func (s *APIServer) handleCaptchaInvalidate(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true})
 }
 
-// handleCaptchaSolve 手动触发一次求解（调试用；有头模式下会弹浏览器窗口）
+// handleCaptchaSolve déclenche manuellement une résolution (débogage ; en mode avec interface une fenêtre de navigateur s'ouvre)
 func (s *APIServer) handleCaptchaSolve(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		AccountID int64 `json:"account_id"`
@@ -893,7 +893,7 @@ func (s *APIServer) handleCaptchaSolve(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ---- 指纹 ----
+// ---- Empreintes ----
 
 func (s *APIServer) handleFingerprints(w http.ResponseWriter, r *http.Request) {
 	out := make([]map[string]string, 0, len(tlsFingerprintPresets))
@@ -903,13 +903,13 @@ func (s *APIServer) handleFingerprints(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"fingerprints": out})
 }
 
-// ---- 模型 ----
+// ---- Modèles ----
 
 func (s *APIServer) handleModelList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"models": s.cfg.GetModels()})
 }
 
-// ---- 工具 ----
+// ---- Utilitaires ----
 
 func queryInt(r *http.Request, key string, def int) int {
 	v := r.URL.Query().Get(key)
@@ -920,7 +920,7 @@ func queryInt(r *http.Request, key string, def int) int {
 	if err != nil {
 		return def
 	}
-	// 夹取范围，防止 LIMIT -1 / 超大值拉全表
+	// Bornage de la plage pour éviter LIMIT -1 / une valeur énorme qui lirait toute la table
 	if n < 1 {
 		return 1
 	}

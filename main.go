@@ -47,18 +47,18 @@ func main() {
 
 	cfg.StartHotReload(30 * time.Second)
 
-	// 客户端伪装版本号：config 优先，其次注册表探测，最后内置默认
+	// Version client usurpée : priorité config, puis détection registre, puis défaut interne
 	appVersion := cfg.GetAppVersion()
 	if appVersion == "" {
 		appVersion = DetectZCodeAppVersion()
 	}
 	log.Printf("[main] zcode app version: %s", appVersion)
 
-	// 账号池（状态机 + 选择策略 + 额度刷新循环）
+	// Pool de comptes (machine d'état + stratégie de sélection + boucle de rafraîchissement)
 	pool := NewAccountPool(db, cfg, appVersion)
 	pool.Start()
 
-	// TLS 指纹钩子（utls 预设 / 自定义 JA3）
+	// Hook d'empreinte TLS (préréglages utls / JA3 personnalisé)
 	fingerprintHook = func() TLSFingerprint {
 		mode, _ := db.GetSetting("fingerprint")
 		ja3, _ := db.GetSetting("custom_ja3")
@@ -67,13 +67,13 @@ func main() {
 		}
 		return TLSFingerprint{Mode: mode, JA3: ja3}
 	}
-	// 迁移：旧库可能残留不在预置表中的指纹值（如 chrome_120），回落到 chrome
+	// Migration : l'ancienne base peut conserver une valeur hors table, repli sur chrome
 	if cur, _ := db.GetSetting("fingerprint"); cur != "" && !isValidFingerprint(cur) {
 		db.SetSetting("fingerprint", "chrome")
 		log.Printf("[main] migrated invalid fingerprint setting %q -> chrome", cur)
 	}
 
-	// 验证码求解服务（阿里云无痕验证，rod 驱动本机 Chrome/Edge）
+	// Service de résolution captcha (Alibaba Cloud sans trace, rod pilotant Chrome/Edge local)
 	captcha := NewCaptchaService(cfg, db, appVersion)
 	egress := NewEgressProxy(db)
 	captchaProxyHook = func(a *Account) string { return egress.ProxyURLForAccount(a) }
@@ -82,30 +82,30 @@ func main() {
 		return filepath.Join(filepath.Dir(exe), "data", "browser-profile")
 	}
 
-	// 上游 API 客户端封装（额度/活动/激活/聊天转发）
+	// Wrapper API amont (quota / activités / activation / relais de chat)
 	zapi := NewZCodeAPI(cfg, db, pool, captcha, appVersion)
 
-	// OAuth 登录管理（环回回调 + 手动粘贴兜底）
+	// Gestion de connexion OAuth (callback loopback + collage manuel de secours)
 	oauth := NewOAuthManager(db, zapi, cfg.GetListenAddr())
 
-	// 账号管理（本地客户端导入 / 粘贴导入 / 一键切回）
+	// Gestion des comptes (import client local / import collage / rebascule)
 	acctMgr := NewAccountManager(db, zapi, oauth)
 
-	// 活动计划调度器
+	// Planificateur de tâches (cron)
 	scheduler := NewCronScheduler(db, zapi)
 	scheduler.Start()
 	defer scheduler.Stop()
 
-	// Web 认证
+	// Authentification Web
 	auth := NewAuthManager(db, os.Getenv("ZCODE_WEB_PASS"))
 
-	// 管理 REST API
+	// API REST d'administration
 	apiServer := NewAPIServer(db, cfg, pool, zapi, oauth, acctMgr, scheduler, auth, captcha)
 
 	mux := http.NewServeMux()
 	apiServer.RegisterRoutes(mux)
 
-	// 2API 端点
+	// Points d'accès 2API
 	mux.HandleFunc("/v1/messages", zapi.HandleMessages)
 	mux.HandleFunc("/v1/messages/", zapi.HandleMessages)
 	mux.HandleFunc("/v1/messages/count_tokens", zapi.HandleCountTokens)
@@ -113,14 +113,14 @@ func main() {
 	mux.HandleFunc("/v1/responses", zapi.HandleResponses)
 	mux.HandleFunc("/v1/models", zapi.HandleModels)
 
-	// OAuth 环回回调（浏览器授权后跳转，无需认证）
+	// Callback loopback OAuth (redirection navigateur après autorisation, sans authentification)
 	mux.HandleFunc("/oauth/callback", oauth.HandleCallback)
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "service": "zcode-proxy"})
 	})
 
-	// 前端 Web 界面
+	// Interface Web frontend
 	webContent, err := fs.ReadFile(webFS, "web/index.html")
 	if err != nil {
 		log.Fatalf("read embedded web/index.html: %v", err)
@@ -136,7 +136,7 @@ func main() {
 	staticHandler := http.StripPrefix("/web/", http.FileServer(http.FS(webSub)))
 	mux.HandleFunc("/web/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/web/static/") {
-			// 静态资源强制 revalidate，避免升级后浏览器用旧 app.js/css 渲染出空控件
+			// Revalidation forcée des ressources statiques
 			w.Header().Set("Cache-Control", "no-cache, must-revalidate")
 			staticHandler.ServeHTTP(w, r)
 			return
@@ -151,7 +151,7 @@ func main() {
 			http.Redirect(w, r, "/web", http.StatusFound)
 			return
 		}
-		// 未知 /api/*、/v1/* 返回 404，避免被兜底 200 吞掉（曾导致假登录/误判）
+		// Renvoyer 404 pour les routes /api/* et /v1/* inconnues
 		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/v1/") {
 			writeAPIError(w, http.StatusNotFound, "not found: "+r.URL.Path)
 			return
@@ -163,7 +163,7 @@ func main() {
 	listenAddr := cfg.GetListenAddr()
 	log.Printf("[main] zcode-proxy listening on http://%s", listenAddr)
 	log.Printf("[main] web UI: http://%s/web", listenAddr)
-	// 显式 Server：ReadHeaderTimeout 防 Slowloris；SSE 决定不设 WriteTimeout
+	// Serveur explicite : ReadHeaderTimeout protège contre Slowloris ; pas de WriteTimeout pour le SSE
 	srv := &http.Server{
 		Addr:              listenAddr,
 		Handler:           auth.Middleware(mux),

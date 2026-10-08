@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// ---- 活动计划 CRUD ----
+// ---- CRUD des plans d'activités ----
 
 func (db *DB) ListClaimPlans() ([]*ClaimPlan, error) {
 	rows, err := db.conn.Query(`
@@ -81,7 +81,7 @@ func (db *DB) UpdateClaimPlanRun(id int64, status, msg string) error {
 	return err
 }
 
-// ---- 活动领取记录 ----
+// ---- Historique des récupérations d'activités ----
 
 func (db *DB) InsertClaimRecord(r *ClaimRecord) error {
 	_, err := db.conn.Exec(`
@@ -121,7 +121,7 @@ func (db *DB) ListClaimRecords(limit int, accountID int64) ([]*ClaimRecord, erro
 	return out, rows.Err()
 }
 
-// ---- 使用记录 ----
+// ---- Historique d'utilisation ----
 
 func (db *DB) InsertUsageRecord(r *UsageRecord) error {
 	_, err := db.conn.Exec(`
@@ -157,7 +157,7 @@ func (db *DB) ListUsageRecords(limit int) ([]*UsageRecord, error) {
 	return out, rows.Err()
 }
 
-// UsageStats 聚合统计（报表页）
+// UsageStats statistiques agrégées (page de rapport)
 func (db *DB) UsageStats(days int) (map[string]interface{}, error) {
 	since := time.Now().AddDate(0, 0, -days).Format("2006-01-02 15:04:05")
 	out := map[string]interface{}{}
@@ -177,7 +177,7 @@ func (db *DB) UsageStats(days int) (map[string]interface{}, error) {
 	out["avg_duration_ms"] = int(avgDur)
 	out["avg_ttft_ms"] = int(avgTtft)
 
-	// 按模型分布
+	// Répartition par modèle
 	models := map[string]int{}
 	rows, err := db.conn.Query(`SELECT model, COUNT(*) FROM usage_records WHERE created_at >= ? GROUP BY model`, since)
 	if err == nil {
@@ -192,7 +192,7 @@ func (db *DB) UsageStats(days int) (map[string]interface{}, error) {
 	}
 	out["by_model"] = models
 
-	// 按账号分布
+	// Répartition par compte
 	accounts := map[string]int{}
 	rows2, err := db.conn.Query(`SELECT MAX(email), COUNT(*) FROM usage_records WHERE created_at >= ? GROUP BY account_id`, since)
 	if err == nil {
@@ -212,7 +212,7 @@ func (db *DB) UsageStats(days int) (map[string]interface{}, error) {
 	return out, nil
 }
 
-// ---- 代理节点 CRUD ----
+// ---- CRUD des nœuds proxy ----
 
 func (db *DB) ListProxyNodes() ([]*ProxyNode, error) {
 	rows, err := db.conn.Query(`
@@ -274,8 +274,8 @@ func (db *DB) UpdateProxyNodeCheck(id int64, status string, latency int, ip, msg
 	return err
 }
 
-// ProxyNodeForGroup 查找组绑定的启用代理节点；组无绑定则回退默认节点。
-// group_name 支持逗号分隔多组。
+// ProxyNodeForGroup recherche le nœud proxy actif lié au groupe ; repli sur le nœud par défaut.
+// group_name prend en charge plusieurs groupes séparés par virgules.
 func (db *DB) ProxyNodeForGroup(group string) (*ProxyNode, error) {
 	nodes, err := db.ListProxyNodes()
 	if err != nil {
@@ -301,7 +301,7 @@ func (db *DB) ProxyNodeForGroup(group string) (*ProxyNode, error) {
 	return nil, nil
 }
 
-// ---- 计划运行记录 ----
+// ---- Historique des exécutions de plan ----
 
 func (db *DB) InsertPlanRunRecord(r *PlanRunRecord) error {
 	_, err := db.conn.Exec(`

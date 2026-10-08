@@ -12,36 +12,36 @@ import (
 	"github.com/google/uuid"
 )
 
-// ---- 协议转换：Anthropic Messages ↔ OpenAI Chat/Responses ----
-// 移植 zcode2api gateway.py 的 _openai_to_anthropic / _responses_to_anthropic /
-// _openai_sse / _responses_sse / _collect_anthropic。
+// ---- Conversion de protocole : Anthropic Messages ↔ OpenAI Chat/Responses ----
+// Porté depuis zcode2api gateway.py : _openai_to_anthropic / _responses_to_anthropic /
+// _openai_sse / _responses_sse / _collect_anthropic.
 
-// StreamUsage 流式嗅探到的用量
+// StreamUsage : usage détecté par sniffing du flux
 type StreamUsage struct {
 	InputTokens  int
 	OutputTokens int
 	StopReason   string
 	ToolCalls    []map[string]interface{}
-	StreamError  string // 上游 SSE error 事件（overloaded_error 等）
+	StreamError  string // événement error SSE amont (overloaded_error, etc.)
 }
 
-// sseEvent 一个完整的 SSE 事件
+// sseEvent : un événement SSE complet
 type sseEvent struct {
 	Event string
 	Data  map[string]interface{}
 }
 
-// maxSSEBuffer 单个流解析缓冲上限（16MB）
+// maxSSEBuffer : limite du tampon d'analyse d'un flux (16 Mo)
 const maxSSEBuffer = 16 << 20
 
-// sseParser 增量 SSE 帧解析器（处理跨 chunk 断帧，兼容 LF/CRLF）
+// sseParser : analyseur incrémental de trames SSE (gère les trames coupées entre chunks, compatible LF/CRLF)
 type sseParser struct {
 	buf strings.Builder
 }
 
 func (p *sseParser) feed(chunk []byte, fn func(sseEvent)) {
 	p.buf.Write(chunk)
-	// 缓冲上限：上游持续不发空行分隔时防止无界增长（OOM 面）
+	// Limite de tampon : empêche une croissance illimitée si l'amont n'envoie jamais de ligne vide (risque d'OOM)
 	if p.buf.Len() > maxSSEBuffer {
 		p.buf.Reset()
 	}
@@ -100,7 +100,7 @@ func parseSSEBlock(block string) (sseEvent, bool) {
 	return ev, ev.Event != "" || ev.Data != nil
 }
 
-// parseAnthropicUsageJSON 非流式 Anthropic 响应提取 usage
+// parseAnthropicUsageJSON : extrait l'usage d'une réponse Anthropic non streaming
 func parseAnthropicUsageJSON(body []byte) *StreamUsage {
 	var v struct {
 		Usage struct {
@@ -115,7 +115,7 @@ func parseAnthropicUsageJSON(body []byte) *StreamUsage {
 	return &StreamUsage{InputTokens: v.Usage.InputTokens, OutputTokens: v.Usage.OutputTokens, StopReason: v.StopReason}
 }
 
-// applyEventToUsage 从单个事件累积 usage / stop_reason / tool_calls
+// applyEventToUsage : accumule usage / stop_reason / tool_calls à partir d'un événement
 func applyEventToUsage(ev sseEvent, usage *StreamUsage, activeTool *map[string]interface{}, textParts, thinkParts *[]string) {
 	switch ev.Event {
 	case "message_start":
@@ -134,7 +134,7 @@ func applyEventToUsage(ev sseEvent, usage *StreamUsage, activeTool *map[string]i
 			if v, ok := u["output_tokens"]; ok {
 				usage.OutputTokens = toInt(v)
 			}
-			// api.z.ai 通道把最终 input_tokens 放在 message_delta（message_start 为 0）
+			// Le canal api.z.ai place les input_tokens finaux dans message_delta (message_start vaut 0)
 			if v, ok := u["input_tokens"]; ok {
 				if n := toInt(v); n > usage.InputTokens {
 					usage.InputTokens = n
@@ -187,7 +187,7 @@ func applyEventToUsage(ev sseEvent, usage *StreamUsage, activeTool *map[string]i
 	case "content_block_stop":
 		*activeTool = nil
 	case "error":
-		// 上游流内错误事件（overloaded_error / 风控中途拦截等），不得被吞掉
+		// Événement d'erreur dans le flux amont (overloaded_error, blocage anti-abus en cours de route, etc.) : ne doit jamais être avalé
 		msg := ""
 		if e, ok := ev.Data["error"].(map[string]interface{}); ok {
 			msg, _ = e["message"].(string)
@@ -202,7 +202,7 @@ func applyEventToUsage(ev sseEvent, usage *StreamUsage, activeTool *map[string]i
 	}
 }
 
-// finalizeToolCalls 把累积的 partial_json 解析为 input
+// finalizeToolCalls : convertit le partial_json accumulé en input
 func finalizeToolCalls(usage *StreamUsage) {
 	for _, call := range usage.ToolCalls {
 		raw, _ := call["_json"].(string)
@@ -229,9 +229,9 @@ func toInt(v interface{}) int {
 	return 0
 }
 
-// ---- 非流式响应写回 ----
+// ---- Écriture de la réponse non streaming ----
 
-// writeProtocolResponse 按客户端协议写回非流式响应
+// writeProtocolResponse : écrit la réponse non streaming selon le protocole du client
 func writeProtocolResponse(w http.ResponseWriter, proto protocol, status int, contentType string,
 	body []byte, usage *StreamUsage, clientModel string) {
 
@@ -242,7 +242,7 @@ func writeProtocolResponse(w http.ResponseWriter, proto protocol, status int, co
 		w.Write(body)
 		return
 	}
-	// OpenAI / Responses：从 Anthropic JSON 提取文本/思考/工具调用
+	// OpenAI / Responses : extrait le texte / la réflexion / les appels d'outils depuis le JSON Anthropic
 	var resp struct {
 		Content []struct {
 			Type     string `json:"type"`
@@ -291,9 +291,9 @@ func writeProtocolResponse(w http.ResponseWriter, proto protocol, status int, co
 	}
 }
 
-// ---- 流式响应写回 ----
+// ---- Écriture de la réponse streaming ----
 
-// streamProtocolResponse 流式透传/转换 + usage 嗅探 + 用量落库
+// streamProtocolResponse : transit/conversion streaming + sniffing de l'usage + persistance de l'usage
 func streamProtocolResponse(w http.ResponseWriter, rc *relayCtx, resp *http.Response,
 	a *Account, r *http.Request, payload []byte, z *ZCodeAPI, start time.Time) {
 
@@ -306,7 +306,7 @@ func streamProtocolResponse(w http.ResponseWriter, rc *relayCtx, resp *http.Resp
 
 	switch {
 	case proto == protocolAnthropic:
-		// 原生透传 + 嗅探
+		// Transit natif + sniffing
 		w.Header().Set("Content-Type", firstNonEmpty(resp.Header.Get("Content-Type"), "text/event-stream"))
 		w.Header().Set("Cache-Control", "no-cache")
 		for _, k := range []string{"x-request-id", "request-id"} {
@@ -343,7 +343,7 @@ func streamProtocolResponse(w http.ResponseWriter, rc *relayCtx, resp *http.Resp
 		}
 		parser.flush(func(ev sseEvent) { applyEventToUsage(ev, &usage, &activeTool, &texts, &thinks) })
 		finalizeToolCalls(&usage)
-		// 透传路径错误事件已原样转发给客户端；此处仅修正用量记录语义并告警
+		// En mode transit, les événements d'erreur sont déjà transmis tels quels au client ; ici on ne corrige que la sémantique de l'enregistrement d'usage et on émet une alerte
 		recStatus := resp.StatusCode
 		if usage.StreamError != "" {
 			recStatus = 502
@@ -367,7 +367,7 @@ func streamProtocolResponse(w http.ResponseWriter, rc *relayCtx, resp *http.Resp
 		z.streamResponses(w, flusher, resp, clientModel, a, r, payload, start)
 
 	default:
-		// 客户端要非流式，但上游是流式：聚合后写单个 JSON
+		// Le client demande du non streaming mais l'amont est en streaming : agrégation puis écriture d'un seul JSON
 		var usage StreamUsage
 		var activeTool map[string]interface{}
 		var texts, thinks []string
@@ -376,7 +376,7 @@ func streamProtocolResponse(w http.ResponseWriter, rc *relayCtx, resp *http.Resp
 		parser.feed(all, func(ev sseEvent) { applyEventToUsage(ev, &usage, &activeTool, &texts, &thinks) })
 		parser.flush(func(ev sseEvent) { applyEventToUsage(ev, &usage, &activeTool, &texts, &thinks) })
 		finalizeToolCalls(&usage)
-		// 上游流内错误或中途断流：不得伪装成成功空响应
+		// Erreur dans le flux amont ou coupure en cours de route : interdiction de la déguiser en réponse vide réussie
 		if usage.StreamError != "" || (readErr != nil && readErr != io.EOF) {
 			msg := usage.StreamError
 			if msg == "" {
@@ -510,7 +510,7 @@ func (z *ZCodeAPI) streamOpenAI(w http.ResponseWriter, flusher http.Flusher, res
 	parser.flush(handle)
 	finalizeToolCalls(&usage)
 
-	// 上游流内错误或中途断流：发 OpenAI 错误 chunk 而非伪装成功
+	// Erreur dans le flux amont ou coupure en cours de route : émettre un chunk d'erreur OpenAI au lieu de simuler un succès
 	if usage.StreamError != "" || (readErr != nil && readErr != io.EOF) {
 		msg := usage.StreamError
 		if msg == "" {
@@ -787,7 +787,7 @@ func (z *ZCodeAPI) streamResponses(w http.ResponseWriter, flusher http.Flusher, 
 	}
 	parser.flush(handle)
 
-	// 关闭未完成的块（上游异常中断兜底）
+	// Ferme les blocs inachevés (filet de sécurité en cas d'interruption anormale de l'amont)
 	for idx := range blocks {
 		blk := blocks[idx]
 		if blk.kind == "tool" {
@@ -797,7 +797,7 @@ func (z *ZCodeAPI) streamResponses(w http.ResponseWriter, flusher http.Flusher, 
 		}
 	}
 
-	// 上游流内错误或中途断流：发 response.failed 而非伪装 completed
+	// Erreur dans le flux amont ou coupure en cours de route : émettre response.failed au lieu de simuler completed
 	if usage.StreamError != "" || (readErr != nil && readErr != io.EOF) {
 		msg := usage.StreamError
 		if msg == "" {
@@ -819,7 +819,7 @@ func (z *ZCodeAPI) streamResponses(w http.ResponseWriter, flusher http.Flusher, 
 
 	fullText := strings.Join(texts, "")
 	fullThinking := strings.Join(thinks, "")
-	// 上游无任何输出时补空 message 项保持事件序列完整
+	// Si l'amont ne produit aucune sortie, ajoute un élément message vide pour garder la séquence d'événements complète
 	if len(usage.ToolCalls) == 0 && fullThinking == "" && fullText == "" {
 		emptyIdx := 0
 		blocks[emptyIdx] = &blockState{kind: "text", outputIndex: 0}
@@ -837,7 +837,7 @@ func (z *ZCodeAPI) streamResponses(w http.ResponseWriter, flusher http.Flusher, 
 	z.recordUsage(a, r, payload, resp.StatusCode, start, ttft, &usage, true)
 }
 
-// ---- OpenAI 响应构造 ----
+// ---- Construction des réponses OpenAI ----
 
 func openaiFinish(stopReason string) string {
 	switch stopReason {

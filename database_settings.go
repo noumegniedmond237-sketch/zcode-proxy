@@ -2,9 +2,9 @@ package main
 
 import "database/sql"
 
-// ---- 设置 KV ----
+// ---- Paramètres KV ----
 
-// GetSetting 读取设置项
+// GetSetting lit un paramètre
 func (db *DB) GetSetting(key string) (string, error) {
 	var v string
 	err := db.conn.QueryRow(`SELECT value FROM settings WHERE key = ?`, key).Scan(&v)
@@ -14,7 +14,7 @@ func (db *DB) GetSetting(key string) (string, error) {
 	return v, err
 }
 
-// SetSetting 写入设置项
+// SetSetting écrit un paramètre
 func (db *DB) SetSetting(key, value string) error {
 	_, err := db.conn.Exec(`
 		INSERT INTO settings (key, value) VALUES (?, ?)
@@ -23,7 +23,7 @@ func (db *DB) SetSetting(key, value string) error {
 	return err
 }
 
-// AllSettings 返回全部设置
+// AllSettings retourne tous les paramètres
 func (db *DB) AllSettings() (map[string]string, error) {
 	rows, err := db.conn.Query(`SELECT key, value FROM settings`)
 	if err != nil {
@@ -40,7 +40,7 @@ func (db *DB) AllSettings() (map[string]string, error) {
 	return out, rows.Err()
 }
 
-// ---- 认证相关设置 ----
+// ---- Paramètres d'authentification ----
 
 func (db *DB) GetPasswordHash() (string, error) { return db.GetSetting("password_hash") }
 func (db *DB) SetPasswordHash(hash string) error { return db.SetSetting("password_hash", hash) }

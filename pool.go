@@ -9,15 +9,15 @@ import (
 	"time"
 )
 
-// ---- 账号池：状态机 + 选择策略 + 额度刷新循环 ----
+// ---- Pool de comptes : machine d'état + stratégie de sélection + boucle de rafraîchissement ----
 //
-// 状态（与 zcode2api models.py 一致，另加 inactive=套餐未激活）：
-//   active    正常可轮询
-//   exhausted 额度用完（402 / remaining=0），不可选，等额度刷新恢复
-//   cooling   限流冷却（429），cooling_until 到期后自动可选
-//   invalid   凭证失效（401/403），需人工处理
-//   disabled  手动禁用
-//   inactive  Coding Plan / Start Plan 未激活（可尝试激活流程恢复）
+// Statuts (alignés avec models.py de zcode2api, avec inactive = forfait non activé) :
+//   active    Normal, éligible à la rotation
+//   exhausted Quota épuisé (402 / remaining=0), inéligible jusqu'au rafraîchissement
+//   cooling   En refroidissement après limitation (429), redevient éligible à l'échéance de cooling_until
+//   invalid   Identifiants invalides (401/403), intervention manuelle requise
+//   disabled  Désactivé manuellement
+//   inactive  Coding Plan / Start Plan non activé (peut tenter la procédure d'activation)
 
 const (
 	StatusActive    = "active"
@@ -28,28 +28,28 @@ const (
 	StatusInactive  = "inactive"
 )
 
-// 选择策略
+// Stratégies de sélection
 const (
 	StrategyRandom     = "random"
 	StrategyRoundRobin = "round_robin"
 	StrategyBestQuota  = "best_quota"
 )
 
-// AccountPool 账号池
+// AccountPool pool de comptes
 type AccountPool struct {
 	db         *DB
 	cfg        *FileConfig
 	appVersion string
 
 	mu       sync.Mutex
-	rotation map[string]int // "group|provider" -> round-robin 游标
+	rotation map[string]int // "group|provider" -> curseur round-robin
 
-	refreshFn func(a *Account) error // 由 ZCodeAPI 注入的额度刷新函数
+	refreshFn func(a *Account) error // Fonction de rafraîchissement injectée par ZCodeAPI
 	stopCh    chan struct{}
 	stopOnce  sync.Once
 }
 
-// NewAccountPool 创建账号池
+// NewAccountPool crée le pool de comptes
 func NewAccountPool(db *DB, cfg *FileConfig, appVersion string) *AccountPool {
 	return &AccountPool{
 		db:         db,
@@ -60,25 +60,25 @@ func NewAccountPool(db *DB, cfg *FileConfig, appVersion string) *AccountPool {
 	}
 }
 
-// SetQuotaFetcher 注入额度刷新实现（解耦 ZCodeAPI 循环依赖）
+// SetQuotaFetcher injecte l'implémentation de rafraîchissement des quotas
 func (p *AccountPool) SetQuotaFetcher(fn func(a *Account) error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.refreshFn = fn
 }
 
-// Start 启动后台额度刷新循环
+// Start lance la boucle d'actualisation en arrière-plan
 func (p *AccountPool) Start() {
 	go p.refreshLoop()
 }
 
-// Stop 停止后台循环
+// Stop arrête la boucle d'arrière-plan
 func (p *AccountPool) Stop() {
 	p.stopOnce.Do(func() { close(p.stopCh) })
 }
 
 func (p *AccountPool) refreshLoop() {
-	// 启动后先等 5 秒（让 HTTP 服务先起来）
+	// Attendre 5 secondes au démarrage (laisser le service HTTP s'initialiser)
 	select {
 	case <-p.stopCh:
 		return
@@ -100,7 +100,7 @@ func (p *AccountPool) refreshLoop() {
 func (p *AccountPool) refreshInterval() int {
 	v, err := p.db.GetSetting("quota_refresh_interval")
 	if err != nil || v == "" {
-		return 60 // 未配置：默认 60s
+		return 60 // Non configuré : 60s par défaut
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil {
@@ -109,10 +109,10 @@ func (p *AccountPool) refreshInterval() int {
 	if n < 0 {
 		return 60
 	}
-	return n // 显式 0 = 关闭后台刷新
+	return n // 0 explicite = désactive l'actualisation en arrière-plan
 }
 
-// refreshAll 刷新所有启用账号的额度（并发 4，账号间 1-3s 随机延迟防风控）
+// refreshAll actualise les quotas de tous les comptes activés (concurrence 4, délai aléatoire 1-3s)
 func (p *AccountPool) refreshAll() {
 	p.mu.Lock()
 	fn := p.refreshFn
@@ -134,7 +134,7 @@ func (p *AccountPool) refreshAll() {
 		if a.ZCodeJWT == "" && a.APIKey == "" {
 			continue
 		}
-		// 冷却中的账号跳过刷新（到期后自然恢复）
+		// Les comptes en refroidissement sont ignorés (récupération naturelle à l'échéance)
 		if a.Status == StatusCooling && a.CoolingUntil > time.Now().Unix() {
 			continue
 		}
@@ -143,7 +143,7 @@ func (p *AccountPool) refreshAll() {
 		go func(acc *Account) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			// 每账号随机延迟 0-2s，模拟人工行为
+			// Délai aléatoire de 0-2s par compte pour simuler un comportement humain
 			time.Sleep(time.Duration(rand.Intn(2000)) * time.Millisecond)
 			if err := fn(acc); err != nil {
 				log.Printf("[pool] refresh quota %s: %v", acc.Email, err)
@@ -153,7 +153,7 @@ func (p *AccountPool) refreshAll() {
 	wg.Wait()
 }
 
-// RefreshOne 手动刷新单个账号额度（API 触发）
+// RefreshOne actualise manuellement le quota d'un seul compte (déclenché par l'API)
 func (p *AccountPool) RefreshOne(a *Account) error {
 	p.mu.Lock()
 	fn := p.refreshFn
@@ -164,7 +164,7 @@ func (p *AccountPool) RefreshOne(a *Account) error {
 	return fn(a)
 }
 
-// ---- 可选性判定（models.py is_selectable 移植）----
+// ---- Éligibilité des comptes (portage de is_selectable de models.py) ----
 
 func accountSelectable(a *Account, now int64) bool {
 	if !a.Enabled || a.Status == StatusDisabled || a.Status == StatusInvalid ||
@@ -172,13 +172,13 @@ func accountSelectable(a *Account, now int64) bool {
 		return false
 	}
 	if a.Status == StatusCooling {
-		// cooling_until<=0（历史/手工数据）视为已到期，避免永久不可选
+		// cooling_until<=0 (données historiques/manuelles) considéré comme expiré
 		return a.CoolingUntil <= 0 || now >= a.CoolingUntil
 	}
 	return true
 }
 
-// EffectiveStatus 考虑冷却到期的实时状态
+// EffectiveStatus état effectif prenant en compte l'expiration du refroidissement
 func EffectiveStatus(a *Account) string {
 	if a.Status == StatusCooling && a.CoolingUntil > 0 && time.Now().Unix() >= a.CoolingUntil {
 		return StatusActive
@@ -186,9 +186,9 @@ func EffectiveStatus(a *Account) string {
 	return a.Status
 }
 
-// ---- 账号选择 ----
+// ---- Sélection de compte ----
 
-// Select 按策略选择账号。group 为空 = 不限组；skip 为已尝试过的账号 ID。
+// Select choisit un compte selon la stratégie. group vide = tout groupe ; skip = IDs déjà tentés.
 func (p *AccountPool) Select(provider, group string, skip map[int64]bool) *Account {
 	accounts, err := p.db.ListAccounts("")
 	if err != nil {
@@ -210,7 +210,7 @@ func (p *AccountPool) Select(provider, group string, skip map[int64]bool) *Accou
 		if !accountSelectable(a, now) {
 			continue
 		}
-		// 必须有可用凭证
+		// Doit avoir un identifiant disponible
 		if a.ZCodeJWT == "" && a.APIKey == "" {
 			continue
 		}
@@ -225,7 +225,7 @@ func (p *AccountPool) Select(provider, group string, skip map[int64]bool) *Accou
 	case StrategyRandom:
 		return pool[rand.Intn(len(pool))]
 	case StrategyBestQuota:
-		// 剩余额度最大者优先；额度未知(0)排后
+		// Priorité au quota restant le plus élevé ; quota inconnu (0) en dernier
 		sort.SliceStable(pool, func(i, j int) bool {
 			return pool[i].Remaining > pool[j].Remaining
 		})
@@ -241,9 +241,9 @@ func (p *AccountPool) Select(provider, group string, skip map[int64]bool) *Accou
 	}
 }
 
-// ---- 状态迁移 ----
+// ---- Transitions d'état ----
 
-// MarkExhausted 额度用完
+// MarkExhausted quota épuisé
 func (p *AccountPool) MarkExhausted(a *Account, reason string) {
 	a.Status = StatusExhausted
 	a.LastError = reason
@@ -251,7 +251,7 @@ func (p *AccountPool) MarkExhausted(a *Account, reason string) {
 	log.Printf("[pool] account %s -> exhausted: %s", a.Email, reason)
 }
 
-// MarkCooling 限流冷却（默认 60s，429 多为瞬时 RPM 峰值）
+// MarkCooling refroidissement suite à une limitation (60s par défaut)
 func (p *AccountPool) MarkCooling(a *Account, reason string, seconds int) {
 	if seconds <= 0 {
 		seconds = 60
@@ -264,7 +264,7 @@ func (p *AccountPool) MarkCooling(a *Account, reason string, seconds int) {
 	log.Printf("[pool] account %s -> cooling %ds: %s", a.Email, seconds, reason)
 }
 
-// MarkInvalid 凭证失效
+// MarkInvalid identifiants expirés ou invalides
 func (p *AccountPool) MarkInvalid(a *Account, reason string) {
 	a.Status = StatusInvalid
 	a.LastError = reason
@@ -272,7 +272,7 @@ func (p *AccountPool) MarkInvalid(a *Account, reason string) {
 	log.Printf("[pool] account %s -> invalid: %s", a.Email, reason)
 }
 
-// MarkInactive 套餐未激活
+// MarkInactive forfait non activé
 func (p *AccountPool) MarkInactive(a *Account, reason string) {
 	a.Status = StatusInactive
 	a.LastError = reason
@@ -280,7 +280,7 @@ func (p *AccountPool) MarkInactive(a *Account, reason string) {
 	log.Printf("[pool] account %s -> inactive: %s", a.Email, reason)
 }
 
-// MarkUsed 成功使用一次（cooling/exhausted 恢复 active）
+// MarkUsed utilisation réussie (cooling/exhausted redevient active)
 func (p *AccountPool) MarkUsed(a *Account) {
 	a.UseCount++
 	a.LastUsedAt = time.Now().Unix()
@@ -291,14 +291,14 @@ func (p *AccountPool) MarkUsed(a *Account) {
 	p.db.TouchAccountUse(a.ID)
 }
 
-// MarkFailed 失败计数
+// MarkFailed incrémente le compteur d'échecs
 func (p *AccountPool) MarkFailed(a *Account, reason string) {
 	a.FailCount++
 	a.LastError = reason
 	p.db.BumpAccountFail(a.ID, reason)
 }
 
-// CoolingInfo 返回该 provider/group 下最近一个冷却中账号的恢复时间与原因（用于 503 提示）
+// CoolingInfo renvoie le délai de récupération et la raison du compte le plus proche pour 503
 func (p *AccountPool) CoolingInfo(provider, group string) (int64, string) {
 	accounts, err := p.db.ListAccounts("")
 	if err != nil {
@@ -324,7 +324,7 @@ func (p *AccountPool) CoolingInfo(provider, group string) (int64, string) {
 	return until, reason
 }
 
-// SelectableCount 返回当前可选账号数（仪表盘）
+// SelectableCount renvoie le nombre de comptes éligibles actuels (tableau de bord)
 func (p *AccountPool) SelectableCount(provider string) int {
 	accounts, err := p.db.ListAccounts("")
 	if err != nil {

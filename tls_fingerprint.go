@@ -11,46 +11,47 @@ import (
 	tls "github.com/refraction-networking/utls"
 )
 
-// ---- TLS 指纹伪装（utls）----
-// ZCode 桌面端是 Electron(Chromium)，Go 默认 crypto/tls 的 ClientHello 指纹差异明显，
-// 易被上游 ESA WAF 识别为机器程序。用 utls 模拟浏览器 TLS 指纹，支持预置与 JA3 自定义。
-// TLS 指纹伪装（utls）：模拟浏览器 ClientHello，降低机器特征评分。
+// ---- Usurpation d'empreinte TLS (utls) ----
+// Le client de bureau ZCode est un Electron (Chromium) ; l'empreinte ClientHello de crypto/tls par défaut de Go
+// se distingue nettement et est facilement identifiée comme un programme automatique par le WAF ESA amont.
+// On utilise utls pour imiter l'empreinte TLS d'un navigateur, avec presets et JA3 personnalisé.
+// Usurpation d'empreinte TLS (utls) : imiter le ClientHello d'un navigateur pour réduire le score de caractéristiques machine.
 
-// TLSFingerprint 当前生效的指纹配置
+// TLSFingerprint configuration d'empreinte actuellement active
 type TLSFingerprint struct {
 	Mode string `json:"mode"` // off|chrome|firefox|...|custom
-	JA3  string `json:"ja3"`  // mode=custom 时的 JA3 字符串
+	JA3  string `json:"ja3"`  // chaîne JA3 lorsque mode=custom
 }
 
-// tlsFingerprintPresets 可选指纹模式（供前端下拉）
+// tlsFingerprintPresets modes d'empreinte disponibles (liste déroulante du frontend)
 var tlsFingerprintPresets = []struct {
 	ID    string `json:"id"`
 	Label string `json:"label"`
 	Group string `json:"group"`
 }{
-	{"off", "关闭（Go 默认指纹）", "基础"},
-	{"randomized", "随机化指纹", "基础"},
-	{"chrome", "Chrome 浏览器（自动最新）", "浏览器"},
-	{"chrome_100", "Chrome 100", "浏览器"},
-	{"chrome_83", "Chrome 83（旧版 Electron 常见）", "浏览器"},
-	{"firefox", "Firefox 浏览器（120）", "浏览器"},
-	{"safari", "Safari 浏览器（16.0）", "浏览器"},
-	{"edge", "Edge 浏览器（85）", "浏览器"},
-	{"qq", "QQ 浏览器（11.1）", "浏览器"},
-	{"q360", "360 浏览器（7.5）", "浏览器"},
-	{"bun", "Bun.js（BoringSSL）", "运行时与工具"},
-	{"node", "Node.js（OpenSSL）", "运行时与工具"},
-	{"deno", "Deno（rustls）", "运行时与工具"},
-	{"curl", "curl（OpenSSL）", "运行时与工具"},
-	{"python", "Python requests（OpenSSL）", "运行时与工具"},
-	{"okhttp", "OkHttp 3（Android）", "运行时与工具"},
-	{"golang", "Go 标准库（crypto/tls）", "运行时与工具"},
-	{"ios", "iOS Safari（14）", "移动端"},
-	{"android", "Android OkHttp（11）", "移动端"},
-	{"custom", "自定义 JA3 指纹", "自定义"},
+	{"off", "Désactivé (empreinte par défaut de Go)", "Base"},
+	{"randomized", "Empreinte aléatoire", "Base"},
+	{"chrome", "Navigateur Chrome (dernière version automatique)", "Navigateurs"},
+	{"chrome_100", "Chrome 100", "Navigateurs"},
+	{"chrome_83", "Chrome 83 (fréquent sur les anciens Electron)", "Navigateurs"},
+	{"firefox", "Navigateur Firefox (120)", "Navigateurs"},
+	{"safari", "Navigateur Safari (16.0)", "Navigateurs"},
+	{"edge", "Navigateur Edge (85)", "Navigateurs"},
+	{"qq", "Navigateur QQ (11.1)", "Navigateurs"},
+	{"q360", "Navigateur 360 (7.5)", "Navigateurs"},
+	{"bun", "Bun.js (BoringSSL)", "Runtimes et outils"},
+	{"node", "Node.js (OpenSSL)", "Runtimes et outils"},
+	{"deno", "Deno (rustls)", "Runtimes et outils"},
+	{"curl", "curl (OpenSSL)", "Runtimes et outils"},
+	{"python", "Python requests (OpenSSL)", "Runtimes et outils"},
+	{"okhttp", "OkHttp 3 (Android)", "Runtimes et outils"},
+	{"golang", "Bibliothèque standard Go (crypto/tls)", "Runtimes et outils"},
+	{"ios", "iOS Safari (14)", "Mobile"},
+	{"android", "Android OkHttp (11)", "Mobile"},
+	{"custom", "Empreinte JA3 personnalisée", "Personnalisé"},
 }
 
-// builtinJA3 非浏览器客户端的公开 JA3 指纹（无 utls 官方预设，转 ClientHelloSpec 还原）
+// builtinJA3 empreintes JA3 publiques de clients non navigateur (aucun preset utls officiel, reconstruites via ClientHelloSpec)
 var builtinJA3 = map[string]string{
 	"bun":    "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-17513,29-23-24,0",
 	"node":   "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-17513,29-23-24,0",
@@ -60,10 +61,10 @@ var builtinJA3 = map[string]string{
 	"okhttp": "771,49199-49195-52393-49196-49200-49162-49161-52392-49171-49172-156-157-47-53,0-11-10-35-16-5-13-18-51-45-43-27-23-17,29-23-24,0",
 }
 
-// fingerprintHook 由 main 注入：返回当前指纹配置
+// fingerprintHook injecté par main : renvoie la configuration d'empreinte courante
 var fingerprintHook = func() TLSFingerprint { return TLSFingerprint{Mode: "chrome"} }
 
-// isValidFingerprint 判断模式是否为合法预置（custom 亦合法）
+// isValidFingerprint indique si le mode est un preset valide (custom est également valide)
 func isValidFingerprint(mode string) bool {
 	if mode == "custom" || mode == "off" {
 		return true
@@ -111,8 +112,8 @@ func presetHelloID(mode string) (tls.ClientHelloID, bool) {
 	return tls.HelloChrome_Auto, false
 }
 
-// utlsHandshake 对已建立的原始连接按指纹配置做 TLS 握手。
-// rawConn 可以是直连 TCP，也可以是经 SOCKS5/HTTP 代理隧道后的连接。
+// utlsHandshake effectue la poignée de main TLS sur une connexion brute déjà établie, selon la configuration d'empreinte.
+// rawConn peut être un TCP en direct ou une connexion tunnelisée via un proxy SOCKS5/HTTP.
 func utlsHandshake(ctx context.Context, rawConn net.Conn, serverName string, fp TLSFingerprint) (net.Conn, error) {
 	if fp.Mode == "" || fp.Mode == "off" {
 		c := stdtls.Client(rawConn, &stdtls.Config{ServerName: serverName, MinVersion: stdtls.VersionTLS12})
@@ -139,7 +140,7 @@ func utlsHandshake(ctx context.Context, rawConn net.Conn, serverName string, fp 
 		uconn.ClientHelloID = tls.HelloCustom
 		if err := uconn.ApplyPreset(spec); err != nil {
 			rawConn.Close()
-			return nil, fmt.Errorf("指纹无效: %w", err)
+			return nil, fmt.Errorf("Empreinte invalide : %w", err)
 		}
 	}
 	if err := uconn.HandshakeContext(ctx); err != nil {
@@ -149,13 +150,13 @@ func utlsHandshake(ctx context.Context, rawConn net.Conn, serverName string, fp 
 	return uconn, nil
 }
 
-// ---- JA3 解析：JA3 字符串 → utls.ClientHelloSpec ----
+// ---- Analyse JA3 : chaîne JA3 → utls.ClientHelloSpec ----
 
 func ja3ToClientHelloSpec(ja3 string) (*tls.ClientHelloSpec, error) {
 	ja3 = strings.TrimSpace(ja3)
 	parts := strings.Split(ja3, ",")
 	if len(parts) != 5 {
-		return nil, fmt.Errorf("JA3 需为 5 段（版本,密码套件,扩展,曲线,点格式）")
+		return nil, fmt.Errorf("JA3 doit comporter 5 segments (version,suites,extensions,courbes,formats)")
 	}
 	ciphers := parseU16List(parts[1])
 	extIDs := parseU16List(parts[2])

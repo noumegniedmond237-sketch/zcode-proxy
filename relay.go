@@ -15,9 +15,9 @@ import (
 	"time"
 )
 
-// ---- 2API 转发核心 ----
-// 移植 zcode2api gateway.py：多账号轮询 + 额度用完自动换号 + 验证码降级链。
-// 降级链：JWT+验证码 → JWT 不带验证参数直连 → API Key 回退端点（api.z.ai）。
+// ---- Cœur de relais 2API ----
+// Portage de gateway.py de zcode2api : rotation multi-comptes + bascule automatique en cas de quota épuisé + chaîne de repli captcha.
+// Chaîne de repli : JWT + captcha → JWT direct sans paramètre → repli API Key (api.z.ai).
 
 const (
 	maxCaptchaRetries  = 3
@@ -25,7 +25,7 @@ const (
 	maxRequestBytes    = 8 << 20
 )
 
-// modelNameMap 上游模型名大小写敏感，客户端小写别名 → 官方名
+// modelNameMap normalisation insensible à la casse des noms de modèles amont
 var modelNameMap = map[string]string{
 	"glm-5.3":       "GLM-5.3",
 	"glm-5.2":       "GLM-5.2",
@@ -40,18 +40,18 @@ var modelNameMap = map[string]string{
 	"glm-4.5-flash": "GLM-4.5-Flash",
 }
 
-// relayOutcome 单次转发结果
+// relayOutcome résultat d'un relais
 type relayOutcome int
 
 const (
-	outcomeWritten       relayOutcome = iota // 响应已写回客户端
-	outcomeNextAccount                       // 账号不可用，换下一个
-	outcomeCaptchaRejected                   // 验证码被拒，尝试下一条路径
-	outcomeUpstreamError                     // 上游最终错误（已写回）
-	outcomeRiskBlocked                       // 风控拦截（3012），尝试本账号下一条路径
+	outcomeWritten       relayOutcome = iota // Réponse écrite au client
+	outcomeNextAccount                       // Compte indisponible, passer au suivant
+	outcomeCaptchaRejected                   // Captcha rejeté, tenter le chemin suivant
+	outcomeUpstreamError                     // Erreur finale amont (déjà écrite)
+	outcomeRiskBlocked                       // Bloqué par contrôle de sécurité (3012), tenter le chemin suivant
 )
 
-// protocol 客户端协议类型（决定响应转换）
+// protocol type de protocole client (détermine la conversion)
 type protocol int
 
 const (
@@ -60,18 +60,18 @@ const (
 	protocolResponses
 )
 
-// relayCtx 一次转发请求的上下文
+// relayCtx contexte d'une requête de relais
 type relayCtx struct {
-	body         map[string]interface{} // 已规范化的 Anthropic 格式请求体
+	body         map[string]interface{} // Corps au format Anthropic normalisé
 	provider     string
 	group        string
 	proto        protocol
-	clientStream bool   // 客户端是否要 SSE
-	clientModel  string // 回显给客户端的模型名
+	clientStream bool   // Si le client attend du SSE
+	clientModel  string // Nom du modèle renvoyé au client
 	includeUsage bool   // OpenAI stream_options.include_usage
 }
 
-// HandleMessages POST /v1/messages — 原生 Anthropic 协议
+// HandleMessages POST /v1/messages — Protocole natif Anthropic
 func (z *ZCodeAPI) HandleMessages(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -100,7 +100,7 @@ func (z *ZCodeAPI) HandleMessages(w http.ResponseWriter, r *http.Request) {
 	z.relay(w, r, rc)
 }
 
-// relay 选账号并按降级链转发
+// relay sélectionne un compte et relaie via la chaîne de repli
 func (z *ZCodeAPI) relay(w http.ResponseWriter, r *http.Request, rc *relayCtx) {
 	payload, _ := json.Marshal(rc.body)
 	tried := map[int64]bool{}
@@ -123,21 +123,21 @@ func (z *ZCodeAPI) relay(w http.ResponseWriter, r *http.Request, rc *relayCtx) {
 		}
 	}
 
-	detail := strings.Join(dedup(reasons), "；")
+	detail := strings.Join(dedup(reasons), " ; ")
 	if len(detail) > 400 {
 		detail = detail[:400] + "…"
 	}
-	msg := "所有账号均不可用或额度已用完，请在后台检查账号状态"
-	// 若因冷却导致无可用账号，给出预计恢复时间
+	msg := "Tous les comptes sont indisponibles ou ont épuisé leur quota, vérifiez l'état des comptes dans l'administration"
+	// Si aucun compte disponible en raison du refroidissement, indiquer le délai estimé
 	if until, reason := z.pool.CoolingInfo(rc.provider, rc.group); until > 0 {
 		secs := until - time.Now().Unix()
 		if secs < 0 {
 			secs = 0
 		}
-		msg = fmt.Sprintf("账号冷却中（%s），约 %d 秒后自动恢复重试", firstNonEmpty(reason, "上游限流/风控"), secs)
+		msg = fmt.Sprintf("Comptes en refroidissement (%s), reprise automatique dans environ %d secondes", firstNonEmpty(reason, "limitation amont / contrôle"), secs)
 	}
 	if detail != "" {
-		msg += "（最近失败原因: " + detail + "）"
+		msg += " (dernières causes d'échec : " + detail + ")"
 	}
 	log.Printf("[relay] no available account: %s", detail)
 	writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{
@@ -145,9 +145,9 @@ func (z *ZCodeAPI) relay(w http.ResponseWriter, r *http.Request, rc *relayCtx) {
 	})
 }
 
-// tryAccount 单账号降级链：JWT+验证码 → JWT 直连 → API Key 回退。
-// 实测免费通道要求人机校验（验证码参数 45s 内可复用），直连仅作放宽时的快速路径。
-// 风控拦截（3012）不立即冷却：先试完本账号其余路径（api.z.ai 独立服务），全部失败才冷却。
+// tryAccount chaîne de repli pour un compte : JWT+captcha → JWT direct → repli API Key.
+// Le canal gratuit exige une validation captcha (paramètre réutilisable 45s).
+// Le blocage de contrôle (3012) ne refroidit pas immédiatement : teste les autres chemins du compte d'abord.
 func (z *ZCodeAPI) tryAccount(w http.ResponseWriter, r *http.Request, a *Account,
 	payload []byte, rc *relayCtx, reasons *[]string, start time.Time) relayOutcome {
 
@@ -158,107 +158,107 @@ func (z *ZCodeAPI) tryAccount(w http.ResponseWriter, r *http.Request, a *Account
 
 	needsCaptcha := rc.provider == "zai" && a.AuthType == "jwt" && a.ZCodeJWT != ""
 
-	// 路径 1：JWT + 阿里云无痕验证码（含失效重解重试）
+	// Chemin 1 : JWT + captcha Alibaba Cloud sans trace
 	if needsCaptcha {
 		verifyParam, region, err := z.captcha.GetVerifyParam(a)
 		if err != nil {
 			verifyParam = ""
-			note("人机校验求解失败: " + truncate(err.Error(), 180))
+			note("Échec de résolution du captcha : " + truncate(err.Error(), 180))
 		}
 		out := z.forwardOnce(w, r, a, payload, verifyParam, region, false, maxCaptchaRetries, rc, start, "jwt-captcha")
 		switch out {
 		case outcomeWritten, outcomeUpstreamError:
 			return out
 		case outcomeNextAccount:
-			note("账号不可用: " + firstNonEmpty(a.LastError, a.Status))
+			note("Compte indisponible : " + firstNonEmpty(a.LastError, a.Status))
 			return outcomeNextAccount
 		case outcomeRiskBlocked:
 			riskBlocked = true
-			note("免费通道风控拦截（unusual activity）")
+			note("Contrôle de sécurité amont sur le canal gratuit (unusual activity)")
 		case outcomeCaptchaRejected:
-			note("带验证码请求被上游拒绝")
+			note("Requête avec captcha rejetée par l'amont")
 		}
 	}
 
-	// 路径 2：JWT 不带验证参数直连（上游放宽时零延迟）
+	// Chemin 2 : JWT direct sans paramètre de validation
 	if a.ZCodeJWT != "" && !riskBlocked {
 		out := z.forwardOnce(w, r, a, payload, "", "", false, 2, rc, start, "jwt-direct")
 		switch out {
 		case outcomeWritten, outcomeUpstreamError:
 			return out
 		case outcomeNextAccount:
-			note("账号不可用: " + firstNonEmpty(a.LastError, a.Status))
+			note("Compte indisponible : " + firstNonEmpty(a.LastError, a.Status))
 			return outcomeNextAccount
 		case outcomeRiskBlocked:
 			riskBlocked = true
-			note("免费通道风控拦截（unusual activity）")
+			note("Contrôle de sécurité amont sur le canal gratuit (unusual activity)")
 		case outcomeCaptchaRejected:
-			note("直连被要求人机校验")
+			note("Connexion directe rejetée : captcha exigé")
 		}
 	}
 
-	// 路径 3：API Key 回退端点（api.z.ai，无需验证码，独立于免费通道风控）
+	// Chemin 3 : Point d'accès de repli API Key (api.z.ai, sans captcha)
 	if a.APIKey != "" {
 		out := z.forwardOnce(w, r, a, payload, "", "", true, 2, rc, start, "apikey")
 		switch out {
 		case outcomeWritten, outcomeUpstreamError:
 			return out
 		case outcomeNextAccount:
-			note("API Key 回退失败: " + firstNonEmpty(a.LastError, a.Status))
+			note("Échec du repli API Key : " + firstNonEmpty(a.LastError, a.Status))
 			return outcomeNextAccount
 		case outcomeRiskBlocked:
-			note("API Key 通道也被风控拦截")
+			note("Canal API Key également bloqué par contrôle de sécurité")
 		case outcomeCaptchaRejected:
-			note("API Key 回退被拒（captcha required）")
+			note("Repli API Key refusé (captcha requis)")
 		}
 	} else if !needsCaptcha {
-		note("无 API Key 可回退")
+		note("Aucune clé API de repli disponible")
 	}
 
-	// 所有路径失败：若是风控拦截则冷却账号
+	// Tous les chemins ont échoué : refroidissement si contrôle de sécurité
 	if riskBlocked {
-		z.pool.MarkCooling(a, "上游风控拦截（unusual activity），全通道失败", 120)
+		z.pool.MarkCooling(a, "Contrôle amont (unusual activity), tous les canaux ont échoué", 120)
 	}
 	log.Printf("[relay] account %s all paths failed", a.Email)
 	return outcomeNextAccount
 }
 
-// forwardOnce 单条路径转发（含验证码失效重解重试）；pathLabel 用于日志
+// forwardOnce relais sur un chemin unique ; pathLabel pour les logs
 func (z *ZCodeAPI) forwardOnce(w http.ResponseWriter, r *http.Request, a *Account,
 	payload []byte, verifyParam, region string, useFallback bool, retries int,
 	rc *relayCtx, start time.Time, pathLabel string) relayOutcome {
 
-	// 内部对 OpenAI/Responses 协议一律流式请求上游，便于聚合与转换
+	// Requête amont en streaming systématique pour OpenAI/Responses afin de faciliter l'agrégation
 	upstreamStream := rc.clientStream || rc.proto != protocolAnthropic
 
 	for attempt := 0; attempt < retries; attempt++ {
 		urlStr, headers := z.buildUpstreamRequest(a, verifyParam, region, useFallback, r, upstreamStream)
 		req, err := http.NewRequestWithContext(r.Context(), "POST", urlStr, bytes.NewReader(payload))
 		if err != nil {
-			// 本地构造错误（配置问题），不归咎账号
+			// Erreur de construction locale (problème de configuration)
 			log.Printf("[relay] build request failed: %v", err)
-			writeAPIError(w, http.StatusInternalServerError, "上游请求构造失败")
+			writeAPIError(w, http.StatusInternalServerError, "Échec de construction de la requête amont")
 			return outcomeUpstreamError
 		}
 		for k, v := range headers {
 			req.Header.Set(k, v)
 		}
 
-		client := ClientForURL(z.egress.ProxyURLForAccount(a), urlStr, 0) // 流式无总超时，靠 context
+		client := ClientForURL(z.egress.ProxyURLForAccount(a), urlStr, 0) // Pas de timeout global en streaming, contrôlé par context
 		resp, err := client.Do(req)
 		if err != nil {
-			// 客户端断连/取消：不动账号状态，直接终止（不写响应，对端已走）
+			// Déconnexion / annulation client
 			if r.Context().Err() != nil || errors.Is(err, context.Canceled) {
 				return outcomeUpstreamError
 			}
-			z.pool.MarkCooling(a, "连接失败: "+truncate(err.Error(), 180), 60)
+			z.pool.MarkCooling(a, "Échec de connexion : "+truncate(err.Error(), 180), 60)
 			return outcomeNextAccount
 		}
 
-		// 3xx：WAF 挑战/登录页重定向（客户端已禁重定向），视为上游异常
+		// 3xx : Défi WAF / redirection de page de connexion
 		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 			resp.Body.Close()
-			z.pool.MarkCooling(a, fmt.Sprintf("上游重定向 HTTP %d（疑似 WAF 挑战）", resp.StatusCode), 120)
+			z.pool.MarkCooling(a, fmt.Sprintf("Redirection amont HTTP %d (défi WAF suspecté)", resp.StatusCode), 120)
 			return outcomeNextAccount
 		}
 
@@ -267,7 +267,7 @@ func (z *ZCodeAPI) forwardOnce(w http.ResponseWriter, r *http.Request, a *Accoun
 			resp.Body.Close()
 			text := string(body)
 
-			// 验证码被拒：失效缓存 → 重解 → 带新参数重试本路径
+			// Captcha rejeté : invalider le cache -> résoudre à nouveau -> réessayer ce chemin
 			if isCaptchaError(text) && (resp.StatusCode == 400 || resp.StatusCode == 401 || resp.StatusCode == 403) {
 				if verifyParam != "" && attempt+1 < retries {
 					z.captcha.InvalidateFor(a)
@@ -283,10 +283,10 @@ func (z *ZCodeAPI) forwardOnce(w http.ResponseWriter, r *http.Request, a *Accoun
 
 			switch {
 			case resp.StatusCode == 401 || resp.StatusCode == 403:
-				z.pool.MarkInvalid(a, fmt.Sprintf("鉴权失败 HTTP %d", resp.StatusCode))
+				z.pool.MarkInvalid(a, fmt.Sprintf("Échec d'authentification HTTP %d", resp.StatusCode))
 				return outcomeNextAccount
 			case resp.StatusCode == 429:
-				// 限流多为模型级 RPM 峰值：请求内退避重试一次（尊重 Retry-After），仍失败再短冷却
+				// Limitation souvent due à un pic RPM temporaire : recul dans la requête puis bref refroidissement
 				retryAfter := 2
 				if ra := resp.Header.Get("Retry-After"); ra != "" {
 					if n, err := strconv.Atoi(ra); err == nil && n > 0 && n <= 5 {
@@ -299,38 +299,37 @@ func (z *ZCodeAPI) forwardOnce(w http.ResponseWriter, r *http.Request, a *Accoun
 					time.Sleep(time.Duration(retryAfter) * time.Second)
 					continue
 				}
-				z.pool.MarkCooling(a, fmt.Sprintf("上游限流 429（model=%s）", rcModel(payload)), 30)
+				z.pool.MarkCooling(a, fmt.Sprintf("Limitation amont 429 (model=%s)", rcModel(payload)), 30)
 				return outcomeNextAccount
 			case isRiskBlocked(text):
-				// 3012 unusual activity：免费通道风控拦截。不立即冷却整个账号，
-				// 先试本账号其余路径（api.z.ai 是独立服务，通常不受影响）。
+				// 3012 unusual activity : blocage contrôle de sécurité sur canal gratuit
 				log.Printf("[relay] account %s risk-blocked on %s path", a.DisplayNameOrEmail(), pathLabel)
 				return outcomeRiskBlocked
 			case isExhaustedError(resp.StatusCode, text):
-				z.pool.MarkExhausted(a, "额度已用完")
+				z.pool.MarkExhausted(a, "Quota épuisé")
 				go z.RefreshAccountQuota(a)
 				return outcomeNextAccount
 			}
 
-			// 其它上游错误：按协议回传客户端
-			z.pool.MarkFailed(a, fmt.Sprintf("上游错误 HTTP %d", resp.StatusCode))
+			// Autres erreurs amont : retransmettre au client selon le protocole
+			z.pool.MarkFailed(a, fmt.Sprintf("Erreur amont HTTP %d", resp.StatusCode))
 			z.recordUsage(a, r, payload, resp.StatusCode, start, 0, nil, rc.clientStream)
 			writeUpstreamErrorForProto(w, resp, text, rc.proto)
 			return outcomeUpstreamError
 		}
 
-		// ---- 成功 ----
+		// ---- Succès ----
 		z.pool.MarkUsed(a)
 		go z.RefreshAccountQuotaThrottled(a)
 		log.Printf("[relay] account %s success via %s (HTTP %d)", a.DisplayNameOrEmail(), pathLabel, resp.StatusCode)
 
 		contentType := resp.Header.Get("Content-Type")
 		isStream := strings.Contains(contentType, "text/event-stream")
-		// 2xx 但非 JSON/SSE（WAF 挑战页/登录页 HTML）：按上游错误处理，不算成功
+		// 2xx mais non JSON/SSE (HTML de défi WAF / login) : traité comme erreur amont
 		if !isStream && !strings.Contains(contentType, "json") {
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 			resp.Body.Close()
-			z.pool.MarkCooling(a, fmt.Sprintf("上游返回非 JSON 内容（%s）", truncate(contentType, 60)), 120)
+			z.pool.MarkCooling(a, fmt.Sprintf("L'amont a renvoyé du contenu non JSON (%s)", truncate(contentType, 60)), 120)
 			writeUpstreamErrorForProto(w, resp, string(body), rc.proto)
 			return outcomeUpstreamError
 		}
@@ -347,17 +346,17 @@ func (z *ZCodeAPI) forwardOnce(w http.ResponseWriter, r *http.Request, a *Accoun
 		streamProtocolResponse(w, rc, resp, a, r, payload, z, start)
 		return outcomeWritten
 	}
-	return outcomeCaptchaRejected // 验证码重试次数用尽
+	return outcomeCaptchaRejected // Nombre maximal de tentatives atteint
 }
 
-// buildUpstreamRequest 组装上游 URL 与请求头（agent.py build_request + zcode-switch 身份头合并）
+// buildUpstreamRequest assemble l'URL et les en-têtes amont
 func (z *ZCodeAPI) buildUpstreamRequest(a *Account, verifyParam, region string, useFallback bool, r *http.Request, stream bool) (string, map[string]string) {
 	up := z.cfg.GetUpstream()
 	var urlStr string
 	headers := map[string]string{}
 
 	if useFallback && a.APIKey != "" {
-		// 回退端点按 provider 选择：bigmodel 的 key 只能发 bigmodel 通道
+		// Le point d'accès de repli dépend du provider : la clé bigmodel ne peut être envoyée que sur le canal bigmodel
 		if a.Provider == "bigmodel" {
 			urlStr = up.Bigmodel
 		} else {
@@ -378,7 +377,7 @@ func (z *ZCodeAPI) buildUpstreamRequest(a *Account, verifyParam, region string, 
 		urlStr = up.Zai
 	}
 
-	// 客户端身份头（与桌面端一致）
+	// En-têtes d'identité client (conformes au client desktop)
 	id := NewClientIdentity(z.appVersion, a.DeviceMid)
 	for k, v := range ZaiClientHeaders(id) {
 		headers[k] = v
@@ -398,7 +397,7 @@ func (z *ZCodeAPI) buildUpstreamRequest(a *Account, verifyParam, region string, 
 		}
 	}
 
-	// 白名单透传客户端 header
+	// En-têtes clients transférés en liste blanche
 	forwardSet := map[string]bool{
 		"accept-language": true, "cache-control": true, "anthropic-beta": true,
 		"anthropic-dangerous-direct-browser-access": true, "traceparent": true,
@@ -415,14 +414,14 @@ func (z *ZCodeAPI) buildUpstreamRequest(a *Account, verifyParam, region string, 
 	return urlStr, headers
 }
 
-// DisplayNameOrEmail 账号展示名
+// DisplayNameOrEmail nom d'affichage du compte
 func (a *Account) DisplayNameOrEmail() string {
 	return firstNonEmpty(a.DisplayName, a.Email, a.UserID)
 }
 
-// ---- 错误识别（gateway.py 移植）----
+// ---- Détection des erreurs (portage de gateway.py) ----
 
-// rcModel 从请求体提取模型名（日志用）
+// rcModel extrait le modèle depuis le corps de requête (pour les logs)
 func rcModel(payload []byte) string {
 	var b struct {
 		Model string `json:"model"`
@@ -448,7 +447,7 @@ func isExhaustedError(statusCode int, text string) bool {
 	low := strings.ToLower(text)
 	for _, m := range []string{
 		"insufficient balance", "insufficient funds", "no resource package",
-		"resource package exhausted", "quota exceeded", "余额不足", "额度已用完",
+		"resource package exhausted", "quota exceeded", "\u4f59\u989d\u4e0d\u8db3", "\u989d\u5ea6\u5df2\u7528\u5b8c",
 	} {
 		if strings.Contains(low, m) {
 			return true
@@ -457,28 +456,28 @@ func isExhaustedError(statusCode int, text string) bool {
 	return false
 }
 
-// isRiskBlocked 风控拦截识别（code 3012 / unusual activity）：账号级临时封禁，冷却处理
+// isRiskBlocked détection de blocage par contrôle de sécurité (code 3012 / unusual activity)
 func isRiskBlocked(text string) bool {
 	low := strings.ToLower(text)
 	return strings.Contains(low, "unusual activity") || strings.Contains(low, `"code":3012`)
 }
 
-// ---- 请求体处理 ----
+// ---- Traitement du corps de requête ----
 
 func readJSONBody(r *http.Request) (map[string]interface{}, *errorResponse) {
 	if r.ContentLength > maxRequestBytes {
-		return nil, &errorResponse{status: http.StatusRequestEntityTooLarge, msg: "请求体过大"}
+		return nil, &errorResponse{status: http.StatusRequestEntityTooLarge, msg: "Corps de requête trop volumineux"}
 	}
 	data, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes+1))
 	if err != nil {
-		return nil, &errorResponse{status: http.StatusBadRequest, msg: "读取请求体失败"}
+		return nil, &errorResponse{status: http.StatusBadRequest, msg: "Échec de lecture du corps de requête"}
 	}
 	if len(data) > maxRequestBytes {
-		return nil, &errorResponse{status: http.StatusRequestEntityTooLarge, msg: "请求体过大"}
+		return nil, &errorResponse{status: http.StatusRequestEntityTooLarge, msg: "Corps de requête trop volumineux"}
 	}
 	var v map[string]interface{}
 	if err := json.Unmarshal(data, &v); err != nil {
-		return nil, &errorResponse{status: http.StatusBadRequest, msg: "请求体不是合法 JSON"}
+		return nil, &errorResponse{status: http.StatusBadRequest, msg: "Le corps de requête n'est pas un JSON valide"}
 	}
 	return v, nil
 }
@@ -500,7 +499,7 @@ func detectProvider(body map[string]interface{}, h http.Header) string {
 	return "zai"
 }
 
-// normalizeBody 模型名规范化 + 默认 max_tokens + GLM-5.3 强制思考 + content 桥接
+// normalizeBody normalisation du nom de modèle + max_tokens par défaut + réflexion forcée GLM-5.3 + pontage de content
 func normalizeBody(body map[string]interface{}, z *ZCodeAPI) error {
 	model, _ := body["model"].(string)
 	if strings.Contains(model, "/") {
@@ -549,7 +548,7 @@ func normalizeBody(body map[string]interface{}, z *ZCodeAPI) error {
 	return nil
 }
 
-// fixThinking GLM-5.3 强制思考模式（上游不允许禁用思考）
+// fixThinking mode de réflexion forcée pour GLM-5.3 (l'amont n'autorise pas sa désactivation)
 func fixThinking(body map[string]interface{}) {
 	model, _ := body["model"].(string)
 	if !strings.Contains(model, "5.3") {
@@ -613,7 +612,7 @@ func validateMessagesBody(body map[string]interface{}) error {
 		case nil:
 			return fmt.Errorf("messages[%d].content must be string or array", i)
 		default:
-			// 反射兜底：转换器可能产出 []map[string]interface{} 等具体切片类型
+			// Repli par réflexion : les convertisseurs peuvent produire []map[string]interface{}
 			rv := reflect.ValueOf(c)
 			if rv.Kind() != reflect.Slice {
 				return fmt.Errorf("messages[%d].content must be string or array", i)
@@ -650,7 +649,7 @@ func validateMessagesBody(body map[string]interface{}) error {
 	return nil
 }
 
-// dedup 去重保序
+// dedup déduplique en conservant l'ordre
 func dedup(in []string) []string {
 	seen := map[string]bool{}
 	var out []string
@@ -663,10 +662,10 @@ func dedup(in []string) []string {
 	return out
 }
 
-// writeUpstreamErrorForProto 上游错误按客户端协议回传
+// writeUpstreamErrorForProto retransmet l'erreur amont selon le protocole client
 func writeUpstreamErrorForProto(w http.ResponseWriter, resp *http.Response, text string, proto protocol) {
 	if proto != protocolAnthropic {
-		// OpenAI 风格错误
+		// Erreur style OpenAI
 		msg := "upstream error"
 		var payload map[string]interface{}
 		if json.Unmarshal([]byte(text), &payload) == nil {
@@ -698,7 +697,7 @@ func writeUpstreamErrorForProto(w http.ResponseWriter, resp *http.Response, text
 	})
 }
 
-// RefreshAccountQuotaThrottled 成功请求后的即时额度刷新（30s 节流）
+// RefreshAccountQuotaThrottled actualisation immédiate du quota après succès (régulation 30s)
 func (z *ZCodeAPI) RefreshAccountQuotaThrottled(a *Account) {
 	if a.Provider != "zai" || a.ZCodeJWT == "" {
 		return
@@ -711,8 +710,7 @@ func (z *ZCodeAPI) RefreshAccountQuotaThrottled(a *Account) {
 	}
 }
 
-// recordUsage 落 usage_records
-// recordUsage 落 usage_records；clientStream 为客户端真实请求模式（非上游内部流式标志）
+// recordUsage enregistre dans usage_records ; clientStream représente le mode réel de la requête client
 func (z *ZCodeAPI) recordUsage(a *Account, r *http.Request, payload []byte, statusCode int, start time.Time, ttftMs int, usage *StreamUsage, clientStream bool) {
 	var body map[string]interface{}
 	json.Unmarshal(payload, &body)

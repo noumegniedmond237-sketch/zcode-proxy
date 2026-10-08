@@ -17,13 +17,13 @@ import (
 	"github.com/google/uuid"
 )
 
-// ---- Z.AI OAuth 授权码登录 ----
-// 移植 zcode2api oauth.py：
-//   一键登录(loopback): redirect_uri=http://127.0.0.1:{port}/oauth/callback, state=随机hex
-//   手动粘贴(manual):   redirect_uri=https://zcode.z.ai/login, state=base64url(JSON{nonce,...})
-// 兑换: POST zcode.z.ai/api/v1/oauth/token {"provider":"zai","code","redirect_uri","state"}
+// ---- Connexion par code d'autorisation OAuth Z.AI ----
+// Portage de oauth.py de zcode2api :
+//   Connexion directe (loopback) : redirect_uri=http://127.0.0.1:{port}/oauth/callback, state=hex aléatoire
+//   Collage manuel (manual) :       redirect_uri=https://zcode.z.ai/login, state=base64url(JSON{nonce,...})
+// Échange : POST zcode.z.ai/api/v1/oauth/token {"provider":"zai","code","redirect_uri","state"}
 //   → data{token(Coding Plan JWT), zai{access_token,refresh_token}, user{...}}
-// API Key 提取链: z/login → getCustomerInfo → api_keys(创建/复用 zcode-api-key) → copy → {key}.{secret}
+// Chaîne d'extraction de la clé API : z/login → getCustomerInfo → api_keys → copy → {key}.{secret}
 
 const (
 	OAuthAuthorizeURL = "https://chat.z.ai/api/oauth/authorize"
@@ -35,7 +35,7 @@ const (
 	CustomerInfoURL   = "https://api.z.ai/api/biz/customer/getCustomerInfo"
 )
 
-// OAuthFlow 一次登录流程的状态
+// OAuthFlow état d'un flux de connexion
 type OAuthFlow struct {
 	State       string `json:"state"`
 	RedirectURI string `json:"redirect_uri"`
@@ -49,17 +49,17 @@ type OAuthFlow struct {
 	AuthorizeURL string `json:"authorize_url"`
 }
 
-// OAuthManager OAuth 登录管理器
+// OAuthManager gestionnaire de connexion OAuth
 type OAuthManager struct {
 	db   *DB
 	zapi *ZCodeAPI
-	port int // 本机监听端口（loopback redirect_uri 用）
+	port int // Port d'écoute local (pour loopback redirect_uri)
 
 	mu    sync.Mutex
 	flows map[string]*OAuthFlow
 }
 
-// NewOAuthManager 创建 OAuth 管理器；listenAddr 形如 127.0.0.1:8687
+// NewOAuthManager crée le gestionnaire OAuth ; listenAddr sous forme 127.0.0.1:8687
 func NewOAuthManager(db *DB, zapi *ZCodeAPI, listenAddr string) *OAuthManager {
 	port := 8687
 	if idx := strings.LastIndex(listenAddr, ":"); idx >= 0 {
@@ -70,7 +70,7 @@ func NewOAuthManager(db *DB, zapi *ZCodeAPI, listenAddr string) *OAuthManager {
 	return &OAuthManager{db: db, zapi: zapi, port: port, flows: make(map[string]*OAuthFlow)}
 }
 
-// StartLogin 创建登录流程，返回 (flow, 授权页 URL)
+// StartLogin initialise un flux de connexion et renvoie (flow, URL d'autorisation)
 func (m *OAuthManager) StartLogin(manual bool, group string) (*OAuthFlow, string) {
 	var state, redirectURI string
 	if manual {
@@ -99,7 +99,7 @@ func (m *OAuthManager) StartLogin(manual bool, group string) (*OAuthFlow, string
 	}
 	m.mu.Lock()
 	m.flows[state] = flow
-	// 清理 10 分钟前的过期流程
+	// Nettoyage des flux expirés après 10 minutes
 	for k, f := range m.flows {
 		if time.Now().Unix()-f.CreatedAt > 600 {
 			delete(m.flows, k)
@@ -109,7 +109,7 @@ func (m *OAuthManager) StartLogin(manual bool, group string) (*OAuthFlow, string
 	return flow, authURL
 }
 
-// HandleCallback 浏览器环回回调：捕获 code → 后台兑换 → 返回结果页
+// HandleCallback callback de redirection du navigateur : capture code -> échange -> renvoie la page de résultat
 func (m *OAuthManager) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	state := strings.TrimSpace(q.Get("state"))
@@ -124,28 +124,28 @@ func (m *OAuthManager) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	m.mu.Unlock()
 	if !ok {
 		fmt.Fprint(w, `<html><body style="font-family:sans-serif;text-align:center;padding-top:80px">
-			<h2>❌ 登录流程不存在或已过期</h2><p>请回到管理界面重新发起登录</p></body></html>`)
+			<h2>❌ Flux de connexion introuvable ou expiré</h2><p>Veuillez relancer la connexion depuis l'interface de gestion</p></body></html>`)
 		return
 	}
 	if errParam != "" {
-		m.finishFlow(flow, "", fmt.Sprintf("授权被拒绝: %s", firstNonEmpty(errDesc, errParam)))
+		m.finishFlow(flow, "", fmt.Sprintf("Autorisation refusée : %s", firstNonEmpty(errDesc, errParam)))
 		fmt.Fprint(w, `<html><body style="font-family:sans-serif;text-align:center;padding-top:80px">
-			<h2>❌ 授权被拒绝</h2><p>`+escapeHTML(firstNonEmpty(errDesc, errParam))+`</p></body></html>`)
+			<h2>❌ Autorisation refusée</h2><p>`+escapeHTML(firstNonEmpty(errDesc, errParam))+`</p></body></html>`)
 		return
 	}
 	if code == "" {
 		fmt.Fprint(w, `<html><body style="font-family:sans-serif;text-align:center;padding-top:80px">
-			<h2>❌ 回调缺少 code</h2></body></html>`)
+			<h2>❌ Le callback ne contient aucun code</h2></body></html>`)
 		return
 	}
 
-	// 同步兑换：页面直接展示成功（含邮箱）或具体错误，避免"显示成功但后台静默失败"
-	m.setFlowStatus(flow, "exchanging", "正在兑换 token…")
+	// Échange synchrone
+	m.setFlowStatus(flow, "exchanging", "Échange du token en cours…")
 	log.Printf("[oauth] callback arrived: state=%s… code_len=%d", safePrefixLog(state, 8), len(code))
 	if err := m.completeFlow(flow, code); err != nil {
 		fmt.Fprint(w, `<html><body style="font-family:sans-serif;text-align:center;padding-top:80px">
-			<h2>❌ 授权码兑换失败</h2><p>`+escapeHTML(err.Error())+`</p>
-			<p style="color:#666;font-size:13px">可回到管理界面使用「OAuth 登录 → 手动粘贴」重试（把授权后地址栏完整 URL 贴入）。</p>
+			<h2>❌ Échec d'échange du code d'autorisation</h2><p>`+escapeHTML(err.Error())+`</p>
+			<p style="color:#666;font-size:13px">Vous pouvez réessayer via « Connexion OAuth → Collage manuel ».</p>
 			</body></html>`)
 		return
 	}
@@ -154,11 +154,11 @@ func (m *OAuthManager) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	email = flow.Email
 	m.mu.Unlock()
 	fmt.Fprint(w, `<html><body style="font-family:sans-serif;text-align:center;padding-top:80px">
-		<h2>✅ 授权成功</h2><p>账号 `+escapeHTML(email)+` 已入库，请回到管理界面查看。</p>
+		<h2>✅ Autorisation réussie</h2><p>Le compte `+escapeHTML(email)+` a été enregistré, vous pouvez fermer cet onglet.</p>
 		<script>setTimeout(function(){window.close()},3000)</script></body></html>`)
 }
 
-// safePrefixLog 日志用安全前缀（不泄露完整 state）
+// safePrefixLog préfixe sécurisé pour les logs
 func safePrefixLog(s string, n int) string {
 	if len(s) <= n {
 		return s
@@ -166,24 +166,24 @@ func safePrefixLog(s string, n int) string {
 	return s[:n]
 }
 
-// SubmitManual 手动粘贴模式：提交回跳 URL 或 code
+// SubmitManual mode de collage manuel : soumission de l'URL de retour ou du code
 func (m *OAuthManager) SubmitManual(state, raw string) error {
 	m.mu.Lock()
 	flow, ok := m.flows[state]
 	m.mu.Unlock()
 	if !ok {
-		return fmt.Errorf("登录流程不存在或已过期")
+		return fmt.Errorf("Flux de connexion inexistant ou expiré")
 	}
 	code := ExtractOAuthCode(raw)
 	if code == "" {
-		return fmt.Errorf("未能从输入中提取授权码")
+		return fmt.Errorf("Impossible d'extraire le code d'autorisation de l'entrée")
 	}
-	m.setFlowStatus(flow, "exchanging", "正在兑换 token…")
+	m.setFlowStatus(flow, "exchanging", "Échange du token en cours…")
 	log.Printf("[oauth] manual submit: state=%s… code_len=%d", safePrefixLog(state, 8), len(code))
 	return m.completeFlow(flow, code)
 }
 
-// ExtractOAuthCode 容忍粘贴整个回跳 URL，从中提取 code
+// ExtractOAuthCode extrait le code même si l'URL complète a été collée
 func ExtractOAuthCode(raw string) string {
 	raw = strings.TrimSpace(strings.Trim(raw, `"'`))
 	if strings.Contains(raw, "code=") {
@@ -195,7 +195,7 @@ func ExtractOAuthCode(raw string) string {
 	return raw
 }
 
-// FlowStatus 查询流程状态（UI 轮询）
+// FlowStatus interroge le statut du flux (sondé par l'UI)
 func (m *OAuthManager) FlowStatus(state string) *OAuthFlow {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -226,21 +226,21 @@ func (m *OAuthManager) finishFlow(f *OAuthFlow, email, errMsg string) {
 	}
 }
 
-// ---- 兑换流程 ----
+// ---- Processus d'échange ----
 
-// completeFlow code → token → API Key → 账号入库；返回错误供回调页展示
+// completeFlow code → token → API Key → enregistrement du compte
 func (m *OAuthManager) completeFlow(flow *OAuthFlow, code string) error {
 	data, err := m.exchangeToken(code, flow.State, flow.RedirectURI)
 	if err != nil {
-		m.finishFlow(flow, "", "token 兑换失败: "+err.Error())
+		m.finishFlow(flow, "", "Échec d'échange du token : "+err.Error())
 		log.Printf("[oauth] exchange failed: %v", err)
-		return fmt.Errorf("token 兑换失败: %w", err)
+		return fmt.Errorf("Échec d'échange du token : %w", err)
 	}
 
 	jwt := jsonStr(data, "token")
 	if jwt == "" {
-		m.finishFlow(flow, "", "返回数据中不含 Coding Plan JWT")
-		return fmt.Errorf("返回数据中不含 Coding Plan JWT")
+		m.finishFlow(flow, "", "Les données retournées ne contiennent aucun JWT Coding Plan")
+		return fmt.Errorf("Les données retournées ne contiennent aucun JWT Coding Plan")
 	}
 	zai, _ := data["zai"].(map[string]interface{})
 	accessToken := jsonStr(zai, "access_token")
@@ -250,7 +250,7 @@ func (m *OAuthManager) completeFlow(flow *OAuthFlow, code string) error {
 		user = map[string]interface{}{}
 	}
 
-	// 用户信息缺失时补查 userinfo
+	// Compléter les informations utilisateur si manquantes
 	if jsonStr(user, "email") == "" && jsonStr(user, "user_id") == "" && accessToken != "" {
 		if ui := m.fetchUserInfo(accessToken); ui != nil {
 			user = ui
@@ -285,7 +285,7 @@ func (m *OAuthManager) completeFlow(flow *OAuthFlow, code string) error {
 		AccountGroup: flow.Group,
 	}
 
-	// API Key 提取链（best-effort：失败不影响 JWT 通道入库）
+	// Chaîne d'extraction de la clé API (au mieux : l'échec n'empêche pas l'enregistrement du compte JWT)
 	if accessToken != "" {
 		if apiKey, err := m.exchangeAPIKey(accessToken); err != nil {
 			log.Printf("[oauth] api key extraction failed for %s: %v", email, err)
@@ -297,8 +297,8 @@ func (m *OAuthManager) completeFlow(flow *OAuthFlow, code string) error {
 
 	id, err := m.db.UpsertAccount(a)
 	if err != nil {
-		m.finishFlow(flow, "", "账号入库失败: "+err.Error())
-		return fmt.Errorf("账号入库失败: %w", err)
+		m.finishFlow(flow, "", "Échec d'enregistrement du compte : "+err.Error())
+		return fmt.Errorf("Échec d'enregistrement du compte : %w", err)
 	}
 	a.ID = id
 	m.mu.Lock()
@@ -307,7 +307,7 @@ func (m *OAuthManager) completeFlow(flow *OAuthFlow, code string) error {
 	m.finishFlow(flow, email, "")
 	log.Printf("[oauth] login success: %s (id=%d)", email, id)
 
-	// 异步刷新额度确认套餐状态
+	// Actualisation asynchrone du quota pour confirmer le statut
 	go func() {
 		time.Sleep(time.Second)
 		if err := m.zapi.RefreshAccountQuota(a); err != nil {
@@ -337,7 +337,7 @@ func (m *OAuthManager) exchangeToken(code, state, redirectURI string) (map[strin
 	if len(v) == 0 && resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(body), 200))
 	}
-	// 业务码兼容 0/200/缺失
+	// Code métier (0, 200 ou absent)
 	if codeVal, has := v["code"]; has {
 		n := jsonInt(v, "code")
 		if n != 0 && n != 200 {
@@ -345,13 +345,13 @@ func (m *OAuthManager) exchangeToken(code, state, redirectURI string) (map[strin
 			if msg == "" {
 				msg = truncate(string(body), 200)
 			}
-			return nil, fmt.Errorf("业务码 %d: %s（HTTP %d）", n, msg, resp.StatusCode)
+			return nil, fmt.Errorf("Code métier %d : %s (HTTP %d)", n, msg, resp.StatusCode)
 		}
 		_ = codeVal
 	}
 	data, ok := v["data"].(map[string]interface{})
 	if !ok || jsonStr(data, "token") == "" {
-		return nil, fmt.Errorf("返回数据中不含 Coding Plan JWT")
+		return nil, fmt.Errorf("Les données retournées ne contiennent aucun JWT Coding Plan")
 	}
 	return data, nil
 }
@@ -377,11 +377,11 @@ func (m *OAuthManager) fetchUserInfo(accessToken string) map[string]interface{} 
 	return nil
 }
 
-// exchangeAPIKey OAuth access_token → 业务 token → 机构/项目 → API Key（oauth.py 移植）
+// exchangeAPIKey OAuth access_token → token métier → organisation/projet → clé API
 func (m *OAuthManager) exchangeAPIKey(accessToken string) (string, error) {
 	client := NewUpstreamHTTPClient(m.zapi.egress.GlobalProxyURL(), 30*time.Second)
 
-	// 1. z/login 换业务 token
+	// 1. z/login pour obtenir le token métier
 	loginBody, _ := json.Marshal(map[string]string{"token": accessToken})
 	resp, err := client.Post(BizLoginURL, "application/json", bytes.NewReader(loginBody))
 	if err != nil {
@@ -389,10 +389,10 @@ func (m *OAuthManager) exchangeAPIKey(accessToken string) (string, error) {
 	}
 	bizToken, err := readDataString(resp, "access_token", "accessToken")
 	if err != nil {
-		return "", fmt.Errorf("业务登录失败: %w", err)
+		return "", fmt.Errorf("Échec de connexion métier : %w", err)
 	}
 
-	// 2. getCustomerInfo 找默认机构/项目
+	// 2. getCustomerInfo pour trouver l'organisation et le projet par défaut
 	req, _ := http.NewRequest("GET", CustomerInfoURL, nil)
 	req.Header.Set("Authorization", "Bearer "+bizToken)
 	resp2, err := client.Do(req)
@@ -414,25 +414,25 @@ func (m *OAuthManager) exchangeAPIKey(accessToken string) (string, error) {
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body2, &info); err != nil {
-		return "", fmt.Errorf("机构信息解析失败: %w", err)
+		return "", fmt.Errorf("Échec d'analyse des informations d'organisation : %w", err)
 	}
 	orgs := info.Data.Organizations
 	if len(orgs) == 0 {
-		return "", fmt.Errorf("找不到可用的机构")
+		return "", fmt.Errorf("Aucune organisation disponible")
 	}
 	org := orgs[0]
 	for _, o := range orgs {
-		if strings.Contains(o.OrganizationName, "默认机构") {
+		if strings.Contains(o.OrganizationName, "\u9ed8\u8ba4\u673a\u6784") {
 			org = o
 			break
 		}
 	}
 	if len(org.Projects) == 0 {
-		return "", fmt.Errorf("找不到可用的项目")
+		return "", fmt.Errorf("Aucun projet disponible")
 	}
 	proj := org.Projects[0]
 	for _, p := range org.Projects {
-		if strings.Contains(p.ProjectName, "默认项目") {
+		if strings.Contains(p.ProjectName, "\u9ed8\u8ba4\u9879\u76ee") {
 			proj = p
 			break
 		}
@@ -441,7 +441,7 @@ func (m *OAuthManager) exchangeAPIKey(accessToken string) (string, error) {
 	projID := fmt.Sprintf("%v", proj.ProjectID)
 	keyURL := fmt.Sprintf("https://api.z.ai/api/biz/v1/organization/%s/projects/%s/api_keys", orgID, projID)
 
-	// 3. 列出 api_keys，找/建 zcode-api-key
+	// 3. Lister les api_keys, trouver ou créer zcode-api-key
 	req3, _ := http.NewRequest("GET", keyURL, nil)
 	req3.Header.Set("Authorization", "Bearer "+bizToken)
 	resp3, err := client.Do(req3)
@@ -484,10 +484,10 @@ func (m *OAuthManager) exchangeAPIKey(accessToken string) (string, error) {
 		apiKey = created.Data.APIKey
 	}
 	if apiKey == "" {
-		return "", fmt.Errorf("获取 API Key 失败")
+		return "", fmt.Errorf("Impossible d'obtenir la clé API")
 	}
 
-	// 4. copy 接口取 secretKey
+	// 4. Copier la clé pour obtenir le secretKey
 	req5, _ := http.NewRequest("GET", keyURL+"/copy/"+apiKey, nil)
 	req5.Header.Set("Authorization", "Bearer "+bizToken)
 	resp5, err := client.Do(req5)
@@ -496,12 +496,12 @@ func (m *OAuthManager) exchangeAPIKey(accessToken string) (string, error) {
 	}
 	secretKey, err := readDataString(resp5, "secretKey")
 	if err != nil {
-		return "", fmt.Errorf("未能解密 Secret Key: %w", err)
+		return "", fmt.Errorf("Impossible de déchiffrer la Secret Key : %w", err)
 	}
 	return apiKey + "." + secretKey, nil
 }
 
-// readDataString 从响应 data 对象中按候选键取字符串
+// readDataString extrait une chaîne par clé candidate depuis la réponse data
 func readDataString(resp *http.Response, keys ...string) (string, error) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -510,21 +510,21 @@ func readDataString(resp *http.Response, keys ...string) (string, error) {
 	}
 	var v map[string]interface{}
 	if json.Unmarshal(body, &v) != nil {
-		return "", fmt.Errorf("响应非 JSON")
+		return "", fmt.Errorf("Réponse non JSON")
 	}
 	data, _ := v["data"].(map[string]interface{})
 	if data == nil {
-		return "", fmt.Errorf("响应缺少 data")
+		return "", fmt.Errorf("data manquant dans la réponse")
 	}
 	for _, k := range keys {
 		if s := jsonStr(data, k); s != "" {
 			return s, nil
 		}
 	}
-	return "", fmt.Errorf("data 中缺少 %v", keys)
+	return "", fmt.Errorf("data ne contient aucun de %v", keys)
 }
 
-// oauthDisplayName 昵称 → 邮箱前缀 → 手机号（oauth.py display_name 移植）
+// oauthDisplayName nom d'affichage : pseudo → préfixe email → téléphone
 func oauthDisplayName(user map[string]interface{}) string {
 	pick := func(keys ...string) string {
 		for _, k := range keys {
@@ -541,7 +541,7 @@ func oauthDisplayName(user map[string]interface{}) string {
 		return strings.SplitN(email, "@", 2)[0]
 	}
 	if phone := pick("phone", "phone_number", "phoneNumber", "mobile"); phone != "" {
-		return "账号" + phone
+		return "Compte " + phone
 	}
 	return ""
 }

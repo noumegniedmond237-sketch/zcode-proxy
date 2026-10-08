@@ -17,16 +17,16 @@ import (
 	"github.com/ysmood/gson"
 )
 
-// ---- 阿里云无痕验证码求解服务 ----
-// 移植 zcode2api captcha.py（Playwright → go-rod）：
-//   1. GET client/configs 拿 captcha 配置（prefix/region/sceneId，缓存 10 分钟）
-//   2. 本机真实 Chrome/Edge（捆绑 Chromium 会被风控识别）打开 zcode.z.ai 同源页
-//   3. 注入阿里云无痕验证 SDK HTML，自动触发 startTracelessVerification
-//   4. window.__onCaptcha 回调捕获 success param（即 X-Aliyun-Captcha-Verify-Param）
-//   5. 参数按出口代理分组缓存 45s；过期后 300s 宽限期内返回旧参数并后台刷新
-//   6. 无头失败自动升级有头窗口让用户手动过，结果同样入缓存
-// 并发模型：容量 1 的信号量保证同一时刻只有一个求解（非阻塞 TryAcquire 用于后台刷新），
-// 不存在锁泄漏路径。
+// ---- Service de résolution du captcha invisible Aliyun ----
+// Portage de zcode2api captcha.py (Playwright → go-rod) :
+//   1. GET client/configs récupère la configuration captcha (prefix/region/sceneId, cache 10 minutes)
+//   2. un vrai Chrome/Edge local (le Chromium embarqué est détecté par l'anti-fraude) ouvre une page de même origine zcode.z.ai
+//   3. injecte le HTML du SDK de vérification invisible Aliyun, déclenche automatiquement startTracelessVerification
+//   4. le callback window.__onCaptcha capture le param success (soit X-Aliyun-Captcha-Verify-Param)
+//   5. le paramètre est mis en cache 45 s par groupe de proxy de sortie ; après expiration, l'ancienne valeur est renvoyée pendant 300 s de grâce avec rafraîchissement en arrière-plan
+//   6. en cas d'échec headless, bascule automatique en fenêtre visible pour validation manuelle, le résultat est également mis en cache
+// Modèle de concurrence : un sémaphore de capacité 1 garantit une seule résolution à la fois (TryAcquire non bloquant pour le rafraîchissement en arrière-plan),
+// aucun chemin de fuite de verrou.
 
 const (
 	captchaCacheTTL     = 45 * time.Second
@@ -38,7 +38,7 @@ const (
 	captchaChromeUA     = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
 
-// CaptchaConfig 验证码配置（client/configs 响应）
+// CaptchaConfig configuration du captcha (réponse client/configs)
 type CaptchaConfig struct {
 	Enabled bool   `json:"enabled"`
 	Region  string `json:"region"`
@@ -52,22 +52,22 @@ type captchaCacheEntry struct {
 	at     time.Time
 }
 
-// CaptchaService 验证码求解服务（并发安全）
+// CaptchaService service de résolution du captcha (sûr en concurrence)
 type CaptchaService struct {
 	cfg        *FileConfig
 	db         *DB
 	appVersion string
 
 	mu       sync.Mutex
-	cache    map[string]*captchaCacheEntry // key = 出口代理 URL（多代理组隔离）
+	cache    map[string]*captchaCacheEntry // key = URL du proxy de sortie (isolation par groupe de proxys)
 	failAt   map[string]time.Time
 	config   *CaptchaConfig
 	configAt time.Time
-	solveSem chan struct{} // 容量 1 信号量：全局唯一求解
-	manual   bool          // 有头手动模式（自动失败后升级）
+	solveSem chan struct{} // sémaphore de capacité 1 : résolution unique globale
+	manual   bool          // mode manuel avec interface (bascule après échec automatique)
 }
 
-// NewCaptchaService 创建验证码服务
+// NewCaptchaService crée le service captcha
 func NewCaptchaService(cfg *FileConfig, db *DB, appVersion string) *CaptchaService {
 	return &CaptchaService{
 		cfg:        cfg,
@@ -83,7 +83,7 @@ func (s *CaptchaService) cacheKey(a *Account) string {
 	return captchaProxyHook(a)
 }
 
-// captchaHTML 阿里云无痕验证注入页（与 zcode2api 逐字一致；配置值经 JSON 转义防注入）
+// captchaHTML page d'injection de la vérification invisible Aliyun (identique mot pour mot à zcode2api ; valeurs de configuration échappées en JSON contre l'injection)
 func captchaHTML(sceneID, region, prefix string) string {
 	js := func(v string) string {
 		b, _ := json.Marshal(v)
@@ -109,11 +109,11 @@ window.initAliyunCaptcha({
 </script></body></html>`
 }
 
-// GetVerifyParam 获取有效验证参数（缓存 → 宽限期旧值 → 重新求解）
+// GetVerifyParam obtient un paramètre de vérification valide (cache → ancienne valeur de grâce → nouvelle résolution)
 func (s *CaptchaService) GetVerifyParam(a *Account) (param, region string, err error) {
 	mode := s.getSetting("captcha_mode")
 	if mode == "off" {
-		return "", "", nil // 关闭验证码：直连（上游可能已放宽）
+		return "", "", nil // Captcha désactivé : connexion directe (l'amont a pu s'assouplir)
 	}
 	key := s.cacheKey(a)
 
@@ -128,13 +128,13 @@ func (s *CaptchaService) GetVerifyParam(a *Account) (param, region string, err e
 		if age < captchaCacheTTL+captchaStaleGrace {
 			p, r := e.param, e.region
 			s.mu.Unlock()
-			go s.refreshInBackground(a) // 宽限期：旧值先用，后台刷新
+			go s.refreshInBackground(a) // Période de grâce : ancienne valeur d'abord, rafraîchissement en arrière-plan
 			return p, r, nil
 		}
 	}
 	if t, ok := s.failAt[key]; ok && time.Since(t) < captchaFailCacheTTL {
 		s.mu.Unlock()
-		return "", "", fmt.Errorf("验证码求解近期失败（风控冷却中），请稍后重试")
+		return "", "", fmt.Errorf("Échec récent de résolution du captcha (refroidissement anti-fraude), veuillez réessayer plus tard")
 	}
 	s.mu.Unlock()
 
@@ -149,7 +149,7 @@ func (s *CaptchaService) getSetting(key string) string {
 	return v
 }
 
-// tryAcquireSolve 非阻塞获取求解权（后台刷新用；拿不到说明已有求解在跑）
+// tryAcquireSolve acquiert le droit de résolution sans bloquer (pour le rafraîchissement en arrière-plan ; un échec signifie qu'une résolution est déjà en cours)
 func (s *CaptchaService) tryAcquireSolve() bool {
 	select {
 	case s.solveSem <- struct{}{}:
@@ -170,11 +170,11 @@ func (s *CaptchaService) refreshInBackground(a *Account) {
 }
 
 func (s *CaptchaService) solveOnce(a *Account) (string, string, error) {
-	s.solveSem <- struct{}{} // 阻塞获取（同步路径，无泄漏：defer 必释放）
+	s.solveSem <- struct{}{} // Acquisition bloquante (chemin synchrone, sans fuite : defer libère toujours)
 	defer s.releaseSolve()
 
 	key := s.cacheKey(a)
-	// 双检：等信号量期间可能已被其他请求求解成功
+	// Double vérification : une autre requête a pu réussir la résolution pendant l'attente du sémaphore
 	s.mu.Lock()
 	if e, ok := s.cache[key]; ok && time.Since(e.at) < captchaCacheTTL {
 		p, r := e.param, e.region
@@ -193,7 +193,7 @@ func (s *CaptchaService) doSolve(a *Account) (string, string, error) {
 		return "", "", err
 	}
 	if !cc.Enabled {
-		return "", "", nil // 上游未开启验证码
+		return "", "", nil // Captcha non activé en amont
 	}
 
 	mode := s.getSetting("captcha_mode")
@@ -206,14 +206,14 @@ func (s *CaptchaService) doSolve(a *Account) (string, string, error) {
 			s.mu.Lock()
 			s.cache[key] = &captchaCacheEntry{param: param, region: cc.Region, at: time.Now()}
 			delete(s.failAt, key)
-			s.manual = false // 成功后回到无头模式
+			s.manual = false // Retour au mode headless après succès
 			s.mu.Unlock()
 			log.Printf("[captcha] solved (headless=%v, attempt=%d, len=%d)", headless, attempt, len(param))
 			return param, cc.Region, nil
 		}
 		lastErr = err
 		log.Printf("[captcha] solve attempt %d failed (headless=%v): %v", attempt, headless, err)
-		// 无头连续失败 2 次后升级有头手动模式
+		// Après 2 échecs headless consécutifs, bascule en mode manuel avec interface
 		if headless && attempt >= 2 {
 			headless = false
 			s.mu.Lock()
@@ -223,7 +223,7 @@ func (s *CaptchaService) doSolve(a *Account) (string, string, error) {
 		}
 	}
 	s.markFail(key)
-	return "", "", fmt.Errorf("验证码求解失败（%d 次尝试）: %v", captchaSolveRetries, lastErr)
+	return "", "", fmt.Errorf("Échec de la résolution du captcha (%d tentatives) : %v", captchaSolveRetries, lastErr)
 }
 
 func (s *CaptchaService) markFail(key string) {
@@ -232,21 +232,21 @@ func (s *CaptchaService) markFail(key string) {
 	s.mu.Unlock()
 }
 
-// InvalidateFor 上游拒绝时失效该出口代理的缓存
+// InvalidateFor invalide le cache de ce proxy de sortie en cas de rejet amont
 func (s *CaptchaService) InvalidateFor(a *Account) {
 	s.mu.Lock()
 	delete(s.cache, s.cacheKey(a))
 	s.mu.Unlock()
 }
 
-// Invalidate 失效全部缓存
+// Invalidate invalide tout le cache
 func (s *CaptchaService) Invalidate() {
 	s.mu.Lock()
 	s.cache = make(map[string]*captchaCacheEntry)
 	s.mu.Unlock()
 }
 
-// Status 服务状态（UI 展示）
+// Status état du service (affichage UI)
 func (s *CaptchaService) Status() map[string]interface{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -271,7 +271,7 @@ func (s *CaptchaService) Status() map[string]interface{} {
 	}
 }
 
-// fetchConfig 获取并缓存验证码配置
+// fetchConfig récupère et met en cache la configuration captcha
 func (s *CaptchaService) fetchConfig(a *Account) (*CaptchaConfig, error) {
 	s.mu.Lock()
 	if s.config != nil && time.Since(s.configAt) < captchaConfigTTL {
@@ -282,7 +282,7 @@ func (s *CaptchaService) fetchConfig(a *Account) (*CaptchaConfig, error) {
 	s.mu.Unlock()
 
 	urlStr := fmt.Sprintf("%s?version=%s&os=%s", ClientConfigsURL, s.appVersion, NodePlatform())
-	// 配置接口无需认证，直接裸请求（zcode.z.ai → 指纹客户端）
+	// L'interface de configuration ne requiert pas d'authentification, requête brute directe (zcode.z.ai → client empreinte)
 	client := ClientForURL("", urlStr, 20*time.Second)
 	req, _ := http.NewRequest("GET", urlStr, nil)
 	id := NewClientIdentity(s.appVersion, "")
@@ -291,7 +291,7 @@ func (s *CaptchaService) fetchConfig(a *Account) (*CaptchaConfig, error) {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("获取验证码配置失败: %w", err)
+		return nil, fmt.Errorf("Échec de récupération de la configuration captcha : %w", err)
 	}
 	defer resp.Body.Close()
 	var body struct {
@@ -309,10 +309,10 @@ func (s *CaptchaService) fetchConfig(a *Account) (*CaptchaConfig, error) {
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return nil, fmt.Errorf("验证码配置解析失败: %w", err)
+		return nil, fmt.Errorf("Échec d'analyse de la configuration captcha : %w", err)
 	}
 	if body.Code != 0 {
-		return nil, fmt.Errorf("验证码配置接口业务码 %d: %s", body.Code, body.Msg)
+		return nil, fmt.Errorf("Code métier %d de l'interface de configuration captcha : %s", body.Code, body.Msg)
 	}
 	c := body.Data.Configs.Captcha
 	cc := &CaptchaConfig{Enabled: c.Enabled, Region: c.Region, Prefix: c.Prefix, SceneID: c.SceneID}
@@ -325,9 +325,9 @@ func (s *CaptchaService) fetchConfig(a *Account) (*CaptchaConfig, error) {
 	return cc, nil
 }
 
-// ---- rod 浏览器求解 ----
+// ---- Résolution via navigateur rod ----
 
-// findRealBrowser 定位本机真实 Chrome/Edge（捆绑 Chromium 会被阿里云风控识别）
+// findRealBrowser localise le vrai Chrome/Edge local (le Chromium embarqué est détecté par l'anti-fraude Aliyun)
 func findRealBrowser() string {
 	if runtime.GOOS != "windows" {
 		for _, p := range []string{
@@ -361,8 +361,8 @@ func findRealBrowser() string {
 	return ""
 }
 
-// solveWithBrowser 启动浏览器求解一次。
-// 任何失败路径都保证已 Launch 的浏览器进程被回收（避免 profile 锁级联瘫痪）。
+// solveWithBrowser lance un navigateur pour effectuer une résolution.
+// Tout chemin d'échec garantit le recyclage du processus navigateur lancé (évite la paralysie en cascade par verrou de profil).
 func (s *CaptchaService) solveWithBrowser(cc *CaptchaConfig, headless bool, a *Account) (param string, err error) {
 	bin := findRealBrowser()
 	l := launcher.New().
@@ -377,20 +377,20 @@ func (s *CaptchaService) solveWithBrowser(cc *CaptchaConfig, headless bool, a *A
 	} else {
 		log.Printf("[captcha] real Chrome/Edge not found, using rod managed browser (may be flagged)")
 	}
-	// 持久化浏览器配置：保留阿里云风控 cookie，避免每次求解都被视为新设备
+	// Configuration navigateur persistante : conserve les cookies anti-fraude Aliyun pour éviter d'être vu comme un nouvel appareil à chaque résolution
 	if profileDir := browserProfileDir(); profileDir != "" {
 		l = l.UserDataDir(profileDir)
 	}
-	// 走账号组出口代理（与上游请求同 IP，避免风控不一致）
+	// Passe par le proxy de sortie du groupe de comptes (même IP que les requêtes amont, évite une incohérence anti-fraude)
 	if proxyURL := captchaProxyHook(a); proxyURL != "" {
 		l = l.Proxy(proxyURL)
 	}
 
 	controlURL, err := l.Launch()
 	if err != nil {
-		return "", fmt.Errorf("启动浏览器失败: %w", err)
+		return "", fmt.Errorf("Échec du démarrage du navigateur : %w", err)
 	}
-	// Launch 成功后立即登记兜底回收：Connect/后续任何失败都杀进程
+	// Enregistre immédiatement un recyclage de secours après un Launch réussi : tout échec de Connect ou ultérieur tue le processus
 	killed := false
 	defer func() {
 		if !killed {
@@ -400,9 +400,9 @@ func (s *CaptchaService) solveWithBrowser(cc *CaptchaConfig, headless bool, a *A
 
 	browser := rod.New().ControlURL(controlURL)
 	if err = browser.Connect(); err != nil {
-		return "", fmt.Errorf("连接浏览器失败: %w", err)
+		return "", fmt.Errorf("Échec de connexion au navigateur : %w", err)
 	}
-	// Connect 成功：交由 browser.Close 回收（含进程），取消兜底 Kill
+	// Connect réussi : le recyclage (processus inclus) est confié à browser.Close, le Kill de secours est annulé
 	defer func() {
 		killed = true
 		browser.Close()
@@ -410,14 +410,14 @@ func (s *CaptchaService) solveWithBrowser(cc *CaptchaConfig, headless bool, a *A
 
 	page, err := browser.Page(proto.TargetCreateTarget{URL: "https://zcode.z.ai/"})
 	if err != nil {
-		return "", fmt.Errorf("打开页面失败: %w", err)
+		return "", fmt.Errorf("Échec de l'ouverture de la page : %w", err)
 	}
 	defer page.Close()
 	if err = page.WaitLoad(); err != nil {
 		log.Printf("[captcha] wait load: %v", err)
 	}
 
-	// 暴露回调：JS window.__onCaptcha(jsonString) → Go channel
+	// Expose le callback : JS window.__onCaptcha(jsonString) → canal Go
 	events := make(chan map[string]interface{}, 8)
 	if _, err = page.Expose("__onCaptcha", func(j gson.JSON) (interface{}, error) {
 		payload := j.Str()
@@ -430,13 +430,13 @@ func (s *CaptchaService) solveWithBrowser(cc *CaptchaConfig, headless bool, a *A
 		}
 		return nil, nil
 	}); err != nil {
-		return "", fmt.Errorf("暴露回调失败: %w", err)
+		return "", fmt.Errorf("Échec de l'exposition du callback : %w", err)
 	}
 
-	// 注入验证码页
+	// Injecte la page captcha
 	html := captchaHTML(cc.SceneID, cc.Region, cc.Prefix)
 	if err = page.SetDocumentContent(html); err != nil {
-		return "", fmt.Errorf("注入页面失败: %w", err)
+		return "", fmt.Errorf("Échec de l'injection de la page : %w", err)
 	}
 
 	deadline := time.After(captchaSolveTimeout)
@@ -449,27 +449,27 @@ func (s *CaptchaService) solveWithBrowser(cc *CaptchaConfig, headless bool, a *A
 				if p, ok := ev["param"].(string); ok && p != "" {
 					return p, nil
 				}
-				return "", fmt.Errorf("success 事件缺少 param")
+				return "", fmt.Errorf("l'événement success ne contient pas de param")
 			case "fail":
 				reason, _ := ev["reason"].(string)
-				return "", fmt.Errorf("验证失败: %s", reason)
+				return "", fmt.Errorf("Échec de la vérification : %s", reason)
 			case "error":
 				reason, _ := ev["reason"].(string)
-				return "", fmt.Errorf("SDK 错误: %s", reason)
+				return "", fmt.Errorf("Erreur SDK : %s", reason)
 			case "starterr":
 				msg, _ := ev["message"].(string)
-				return "", fmt.Errorf("启动异常: %s", msg)
+				return "", fmt.Errorf("Exception au démarrage : %s", msg)
 			}
 		case <-deadline:
-			return "", fmt.Errorf("求解超时（%v）", captchaSolveTimeout)
+			return "", fmt.Errorf("Délai de résolution dépassé (%v)", captchaSolveTimeout)
 		}
 	}
 }
 
-// captchaProxyHook 由 main 注入：返回账号组出口代理 URL
+// captchaProxyHook injecté par main : renvoie l'URL du proxy de sortie du groupe de comptes
 var captchaProxyHook = func(a *Account) string { return "" }
 
-// browserProfileHook 由 main 注入：返回持久化浏览器配置目录
+// browserProfileHook injecté par main : renvoie le répertoire de configuration navigateur persistant
 var browserProfileHook = func() string { return "" }
 
 func browserProfileDir() string {
