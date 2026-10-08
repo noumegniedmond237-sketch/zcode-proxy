@@ -144,11 +144,3 @@ func (z *ZCodeAPI) HandleModels(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"object": "list", "data": data})
 }
-			"display_name": m,
-			"created":      now,
-			"created_at":   "2025-01-01T00:00:00Z",
-			"owned_by":     "zcode-proxy",
-		})
-	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"object": "list", "data": data})
-}

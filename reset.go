@@ -304,7 +304,6 @@ func (z *ZCodeAPI) SyncModelCatalog() ([]CatalogModel, error) {
 
 // GetModelCatalog lit le catalogue en cache
 func (z *ZCodeAPI) GetModelCatalog() []CatalogModel {
-func (z *ZCodeAPI) GetModelCatalog() []CatalogModel {
 	raw, _ := z.db.GetSetting("model_catalog")
 	if raw == "" {
 		return nil
