@@ -1,25 +1,25 @@
-# 运行时数据（含账号凭证，绝不提交）
+# Données d'exécution (contient les identifiants de compte, ne jamais committer)
 data/
 *.db
 *.db-*
 
-# 日志
+# Journaux / Logs
 *.log
 server.log
 
-# 构建产物
+# Fichiers de compilation / Binaires
 *.exe
 *.exe~
 *.dll
 *.so
 
-# 运行时生成的配置
+# Configuration générée à l'exécution
 config/config.json
 
-# 参考仓库（他人代码，不入库）
+# Dépôts de référence (code tiers, non suivi)
 refs/
 
-# 编辑器/系统
+# Éditeurs et fichiers système
 .DS_Store
 Thumbs.db
 .idea/
